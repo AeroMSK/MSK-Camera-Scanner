@@ -55,25 +55,8 @@ stop_scan = False
 pause_scan = False
 
 
-def gradient_text(text, start_color, end_color):
-    """Generate RGB gradient text using ANSI escape codes"""
-    result = ""
-    length = len(text)
-    if length == 0: return text
-    
-    for i, char in enumerate(text):
-        # Calculate intermediate RGB values
-        r = int(start_color[0] + (end_color[0] - start_color[0]) * i / length)
-        g = int(start_color[1] + (end_color[1] - start_color[1]) * i / length)
-        b = int(start_color[2] + (end_color[2] - start_color[2]) * i / length)
-        
-        result += f"\033[38;2;{r};{g};{b}m{char}"
-    
-    return result
-
-
 def print_banner():
-    """Display main banner with RGB gradient and box border (optimized for Termux)"""
+    """Display main banner with hacking green colors and box border (optimized for Termux)"""
     # Enable ANSI (important for Windows)
     os.system("")
     
@@ -81,12 +64,6 @@ def print_banner():
     width = 60
     internal_width = width - 2 # 58
     
-    # Purple → Blue → Cyan gradient stages
-    gradients = [
-        ((180, 0, 255), (0, 100, 255)),   # purple → blue
-        ((0, 100, 255), (0, 255, 200)),   # blue → cyan
-    ]
-
     banner = [
         "███╗   ███╗██╗   ██╗███████╗██╗ ██████╗ ███╗   ██╗",
         "████╗ ████║██║   ██║██╔════╝██║██╔═══██╗████╗  ██║",
@@ -96,34 +73,30 @@ def print_banner():
         "╚═╝     ╚═╝ ╚═════╝ ╚══════╝╚═╝ ╚═════╝ ╚═╝  ╚═══╝"
     ]
 
-    # Colors
-    green_border = "\033[92m"
+    # Hacking Green colors
+    green = "\033[92m"
     red_warning = "\033[91m"
     reset = "\033[0m"
 
-    print(f"{green_border}╔" + "═" * internal_width + "╗")
+    print(f"{green}╔" + "═" * internal_width + "╗")
     
-    for i, line in enumerate(banner):
-        # Alternate gradient direction for more “cyber” feel
-        start, end = gradients[i % len(gradients)]
-        colored_line = gradient_text(line, start, end)
-        
+    for line in banner:
         # Center the logo line
         left_pad = (internal_width - len(line)) // 2
         right_pad = internal_width - len(line) - left_pad
-        print(f"║{' ' * left_pad}{colored_line}{green_border}{' ' * right_pad}║")
+        print(f"║{' ' * left_pad}{green}{line}{' ' * right_pad}║")
 
     print(f"║{' ' * internal_width}║")
     
     warning_text = "⚠ WARNING: Do not use this tool without MSK's permission."
     w_left_pad = (internal_width - len(warning_text)) // 2
     w_right_pad = internal_width - len(warning_text) - w_left_pad
-    print(f"║{' ' * w_left_pad}{red_warning}{warning_text}{green_border}{' ' * w_right_pad}║")
+    print(f"║{' ' * w_left_pad}{red_warning}{warning_text}{green}{' ' * w_right_pad}║")
     
     print(f"╚" + "═" * internal_width + f"╝{reset}")
 
-    print(f"{green_border}[*] Developed by: {Fore.YELLOW}MSK{reset}")
-    print(f"{green_border}[*] Termux Supported ✓{reset}\n")
+    print(f"{green}[*] Developed by: {Fore.YELLOW}MSK{reset}")
+    print(f"{green}[*] Termux Supported ✓{reset}\n")
 def validate_ip(ip_str):
     """Validate IP address format"""
     try:
@@ -878,29 +851,9 @@ def run_gui():
 ╚═════════════════════════════════════════════════════════════════╝"""
     txt_logo.insert(tk.END, musion_text)
     
-    # Exact gradient colors from image (Purple -> Blue -> Cyan)
-    txt_logo.tag_config("magenta", foreground="#B400FF") # Purple/Pink
-    txt_logo.tag_config("purple", foreground="#8000FF")  # Deep Purple
-    txt_logo.tag_config("blue", foreground="#0064FF")    # Blue
-    txt_logo.tag_config("cyan", foreground="#00FFC8")    # Cyan
-    txt_logo.tag_config("teal", foreground="#00FFAA")    # Teal
-    txt_logo.tag_config("green", foreground="#00FF00")   # Green
-    txt_logo.tag_config("border", foreground="#00FF00")  # Green Border from the prompt
-    
-    txt_logo.tag_add("border", "1.0", tk.END)
-    for l in range(3, 9):
-        # M: Pink to Purple gradient
-        txt_logo.tag_add("magenta" if l < 6 else "purple", f"{l}.4", f"{l}.15")
-        # U: Purple to Blue gradient
-        txt_logo.tag_add("purple" if l < 6 else "blue", f"{l}.15", f"{l}.24")
-        # S: Blue to Cyan gradient
-        txt_logo.tag_add("blue" if l < 6 else "cyan", f"{l}.24", f"{l}.33")
-        # I: Cyan
-        txt_logo.tag_add("cyan", f"{l}.33", f"{l}.36")
-        # O: Cyan to Teal gradient
-        txt_logo.tag_add("cyan" if l < 6 else "teal", f"{l}.36", f"{l}.46")
-        # N: Teal to Green gradient
-        txt_logo.tag_add("teal" if l < 6 else "green", f"{l}.46", f"{l}.58")
+    # Hacking Green logo tags
+    txt_logo.tag_config("green", foreground="#00FF00")
+    txt_logo.tag_add("green", "1.0", tk.END)
 
     txt_logo.config(state=tk.DISABLED)
 
