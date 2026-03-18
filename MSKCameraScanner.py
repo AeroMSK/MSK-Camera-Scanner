@@ -52,6 +52,37 @@ try:
 except ImportError:
     HAS_REQUESTS = False
 
+def typing_print(text, speed=0.005):
+    """Prints text character by character for a cinematic effect"""
+    for char in text:
+        sys.stdout.write(char)
+        sys.stdout.flush()
+        time.sleep(speed)
+    print()
+
+
+def glitch_intro():
+    """Short glitch-like effect before clearing the screen"""
+    chars = "!@#$%^&*()_+{}[]|;:,.<>?"
+    for _ in range(5):
+        glitch = "".join(random.choice(chars) for _ in range(60))
+        sys.stdout.write(f"\r{Fore.GREEN}{glitch}{Style.RESET_ALL}")
+        sys.stdout.flush()
+        time.sleep(0.04)
+    sys.stdout.write("\r" + " " * 60 + "\r")
+
+
+def loading_spinner(duration=0.8, task="Initializing"):
+    """Animated loading spinner for transitions"""
+    spinner = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+    end_time = time.time() + duration
+    while time.time() < end_time:
+        for char in spinner:
+            sys.stdout.write(f"\r{Fore.GREEN}[*] {task}... {char}{Style.RESET_ALL}")
+            sys.stdout.flush()
+            time.sleep(0.08)
+    sys.stdout.write("\r" + " " * 60 + "\r")
+
 # Default credentials to try
 DEFAULT_CREDENTIALS = [
     ("admin", "admin123"),
@@ -182,6 +213,8 @@ def safe_print(msg, color=Fore.GREEN, end='\n'):
         print(f"{color}{msg}{Style.RESET_ALL}", end=end)
 
 
+
+
 def print_banner():
     """Display main banner with hacking green colors and box border (optimized for Termux)"""
     # Enable ANSI (important for Windows)
@@ -308,16 +341,6 @@ def extract_title(html_content):
         return "Error Extracting Title"
 
 
-def loading_spinner(duration=0.8, task="Initializing"):
-    """Animated loading spinner for transitions"""
-    spinner = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
-    end_time = time.time() + duration
-    while time.time() < end_time:
-        for char in spinner:
-            sys.stdout.write(f"\r{Fore.GREEN}[*] {task}... {char}{Style.RESET_ALL}")
-            sys.stdout.flush()
-            time.sleep(0.08)
-    sys.stdout.write("\r" + " " * 60 + "\r")
 
 
 def get_camera_type(response_str, title, filter_mode=1):
