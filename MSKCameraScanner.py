@@ -346,32 +346,61 @@ def extract_title(html_content):
 def get_camera_type(response_str, title, filter_mode=1):
     """
     Fingerprint camera and filter based on user choice.
-    filter_mode: 1 = Show All, 2 = Only WEB, WEB SERVICE, CPlus
+    filter_mode: 1 = Show All, 2 = Only Cameras
     """
-    t_low = title.lower()
+    t_low = title.lower().strip()
     r_low = response_str.lower()
     
-    # Priority Categories (WEB, WEB SERVICE, CPlus)
-    if 'web service' in t_low or '<title>web service</title>' in r_low:
-        return "WEB SERVICE"
-    if 'cplus' in t_low or 'cplus' in r_low or 'c+' in t_low:
-        return "CPlus"
-    if 'web' in t_low:
-        return "WEB"
+    # 1. Check for Specific Camera Manufacturers/Categories
+    camera_found = False
+    cam_type = None
     
-    # If mode is 2 (Strict), stop here if no match
+    # Priority Categories (Exact or near-exact match)
+    if t_low == 'web' or t_low == 'web service' or '<title>web service</title>' in r_low:
+        cam_type = "WEB" if t_low == 'web' else "WEB SERVICE"
+        camera_found = True
+    elif t_low == 'cplus' or 'cplus' in r_low or t_low == 'c+':
+        cam_type = "CPlus"
+        camera_found = True
+    
+    # Major Brands
+    if not camera_found:
+        if 'hikvision' in r_low or 'hikvision' in t_low or '/isapi/' in r_low:
+            cam_type = "HIKVISION"
+            camera_found = True
+        elif 'dahua' in r_low or 'dahua' in t_low or 'dh-' in t_low or 'dh-' in r_low:
+            cam_type = "DAHUA"
+            camera_found = True
+        elif 'axis' in t_low or 'axis network' in t_low:
+            cam_type = "AXIS"
+            camera_found = True
+        elif 'sony' in t_low and 'camera' in t_low:
+            cam_type = "SONY"
+            camera_found = True
+        elif 'bosch' in t_low and 'camera' in t_low:
+            cam_type = "BOSCH"
+            camera_found = True
+            
+    # Generic IP Camera Fingerprints
+    if not camera_found:
+        if any(x in t_low for x in ['ip camera', 'ip cam', 'network camera', 'ipcam', 'dvr', 'nvr']):
+            cam_type = "IP CAMERA"
+            camera_found = True
+        elif 'h.264' in t_low or 'monitoring system' in t_low or 'view.html' in r_low:
+            cam_type = "GENERIC CAMERA"
+            camera_found = True
+            
+    # Handle Filtering
+    if camera_found:
+        return cam_type
+        
+    # If mode is 2 (Strict), stop here if no camera match found
     if filter_mode == 2:
         return None
         
-    # Regular detection for "Show All" (Mode 1)
-    if 'login' in t_low:
+    # Regular detection for "Show All" (Mode 1) - Login pages etc.
+    if 'login' in t_low or 'index.html' in r_low:
         return "Camera - Login"
-    if 'login.asp' in r_low:
-        return "Camera - HIK Vision"
-    if 'dvr' in t_low or 'camera' in t_low:
-        return "Camera - DVR"
-    if 'ipcam' in t_low or 'ip cam' in t_low:
-        return "Camera - IP Camera"
         
     return None
 
@@ -480,8 +509,8 @@ def super_fast_scan(gui_start_ip=None, gui_end_ip=None, gui_filter_mode=None):
         filter_mode = gui_filter_mode if gui_filter_mode is not None else 1
     else:
         print(f"{Fore.CYAN}Options for Scan Output:{Style.RESET_ALL}")
-        print(f"  1. Show all found cameras")
-        print(f"  2. Show only WEB, WEB SERVICE, and CPlus")
+        print(f"  1. Show all (Diagnostic Mode)")
+        print(f"  2. Show only cameras (Stricter Filter)")
         
         while True:
             f_choice = input(f"{Fore.GREEN}Select option (1/2): {Style.RESET_ALL}").strip()
@@ -646,8 +675,10 @@ def super_fast_scan(gui_start_ip=None, gui_end_ip=None, gui_filter_mode=None):
     
     if results:
         # Post-scan credential check for CLI
+        # Post-scan credential check for CLI
         if gui_start_ip is None:
-            brute_forcible = [r for r in results if r['type'] in ["WEB SERVICE", "CPlus", "WEB"]]
+            # All identified camera brands and generic types are compatible
+            brute_forcible = [r for r in results if r['type'] not in ["Camera - Login"]]
             if brute_forcible:
                 print(f"{Fore.YELLOW}[!] Found {len(brute_forcible)} cameras compatible with default credential testing.{Style.RESET_ALL}")
                 choice = input(f"{Fore.GREEN}Would you like to try default credentials on them? (y/n): {Style.RESET_ALL}").lower().strip()
@@ -673,7 +704,7 @@ def super_fast_scan(gui_start_ip=None, gui_end_ip=None, gui_filter_mode=None):
     else:
         print(f"{Fore.YELLOW}[!] No cameras found{Style.RESET_ALL}")
     
-    print(f"\n{Fore.CYAN}[i] Total IPs scanned: {len(ip_list)}{Style.RESET_ALL}")
+    print(f"\n{Fore.CYAN}[i] Total IPs scanned: {total_count}{Style.RESET_ALL}")
     print(f"{Fore.CYAN}[i] Time taken: {elapsed:.2f} seconds{Style.RESET_ALL}")
     
     if gui_start_ip is None:
@@ -1170,7 +1201,7 @@ def run_gui():
         run_in_thread(trace_route)
 
     def do_super_fast_scan():
-        filter_mode = simpledialog.askinteger("Option", "Select Mode:\n1. Show All\n2. Show WEB, WEB SERVICE, and CPlus", parent=root, minvalue=1, maxvalue=2)
+        filter_mode = simpledialog.askinteger("Option", "Select Mode:\n1. Show All (Diagnostic)\n2. Show Only Cameras (Brands & Generic)", parent=root, minvalue=1, maxvalue=2)
         if filter_mode is None: return
         
         start_ip = simpledialog.askstring("Input", "Enter Start IP or CIDR:\n(e.g., 192.168.1.1 or 192.168.1.0/24)", parent=root)
@@ -1192,9 +1223,9 @@ def run_gui():
         run_in_thread(neighbours_camera_scanner)
 
     def do_brute_force():
-        brute_forcible = [r for r in found_cameras_store if r.get('type') in ["WEB SERVICE", "CPlus", "WEB"]]
+        brute_forcible = [r for r in found_cameras_store if r.get('type') not in ["Camera - Login"]]
         if not brute_forcible:
-            messagebox.showinfo("Wait", "No compatible cameras found in last scan.\n(Compatible: WEB, WEB SERVICE, CPlus)", parent=root)
+            messagebox.showinfo("Wait", "No compatible cameras found in last scan.", parent=root)
             return
         
         if not messagebox.askyesno("Confirm", f"Try default credentials on {len(brute_forcible)} found cameras?", parent=root):
