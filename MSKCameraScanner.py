@@ -478,6 +478,7 @@ def trace_route():
         print(f"{Fore.RED}[!] Error: {e}{Style.RESET_ALL}")
     
     print(f"\n{Fore.CYAN}{'='*50}{Style.RESET_ALL}")
+    input(f"\n{Fore.CYAN}Press Enter to continue...{Style.RESET_ALL}")
 
 
 def super_fast_scan(gui_start_ip=None, gui_end_ip=None, gui_filter_mode=None):
@@ -661,21 +662,12 @@ def super_fast_scan(gui_start_ip=None, gui_end_ip=None, gui_filter_mode=None):
     scan_queue.join()
     elapsed = time.time() - start_time
     
-    # Display results
+    # Display completion summary
     print(f"\n{Fore.CYAN}{'═'*50}{Style.RESET_ALL}")
     print(f"{Fore.GREEN}[✓] SUPER FAST SCAN COMPLETE!{Style.RESET_ALL}")
     print(f"{Fore.CYAN}{'═'*50}{Style.RESET_ALL}\n")
     
     if results:
-        print(f"{Fore.RED}[*] Found {len(results)} CAMERAS:{Style.RESET_ALL}\n")
-        for idx, r in enumerate(results, 1):
-            print(f"{Fore.CYAN}[{idx}] {r['ip']}:{r['port']}{Style.RESET_ALL}")
-            print(f"    Title: {Fore.YELLOW}{r['title']}{Style.RESET_ALL}")
-            print(f"    Server: {Fore.YELLOW}{r['server']}{Style.RESET_ALL}")
-            print(f"    Type: {Fore.RED}{r['type']}{Style.RESET_ALL}")
-            print(f"    URL: {Fore.WHITE}{r['url']}{Style.RESET_ALL}")
-            print()
-        
         # Post-scan credential check for CLI
         if gui_start_ip is None:
             brute_forcible = [r for r in results if r['type'] in ["WEB SERVICE", "CPlus", "WEB"]]
@@ -706,6 +698,9 @@ def super_fast_scan(gui_start_ip=None, gui_end_ip=None, gui_filter_mode=None):
     
     print(f"\n{Fore.CYAN}[i] Total IPs scanned: {len(ip_list)}{Style.RESET_ALL}")
     print(f"{Fore.CYAN}[i] Time taken: {elapsed:.2f} seconds{Style.RESET_ALL}")
+    
+    if gui_start_ip is None:
+        input(f"\n{Fore.CYAN}Press Enter to continue...{Style.RESET_ALL}")
     return results
 
 
@@ -748,9 +743,8 @@ def brute_force_cameras(camera_list, output_widget=None):
             log(f"    [-] No match for {ip}:{port}", Fore.RED)
             
     log(f"\n[✓] Credential test complete. Found {success_count} matches.", Fore.GREEN)
-    print(f"{Fore.CYAN}[i] Cameras found: {len(results)}{Style.RESET_ALL}")
-    print(f"{Fore.CYAN}[i] Time taken: {elapsed:.2f} seconds{Style.RESET_ALL}")
-    print(f"{Fore.CYAN}[i] Speed: {(len(ip_list)*2)/elapsed:.0f} ports/sec{Style.RESET_ALL}")
+    if not output_widget:
+        input(f"\n{Fore.CYAN}[!] Press Enter to continue...{Style.RESET_ALL}")
 
 
 def scan(ip, port):
@@ -1049,13 +1043,6 @@ def neighbours_camera_scanner():
     print(f"{Fore.CYAN}{'═'*50}{Style.RESET_ALL}\n")
     
     if results:
-        print(f"{Fore.RED}[*] Found {len(results)} RTSP CAMERAS:{Style.RESET_ALL}\n")
-        for idx, r in enumerate(results, 1):
-            print(f"{Fore.CYAN}[{idx}] {r['ip']}{Style.RESET_ALL}")
-            print(f"    Name: {Fore.YELLOW}{r['name']}{Style.RESET_ALL}")
-            print(f"    RTSP URL: {Fore.WHITE}{r['rtsp_url']}{Style.RESET_ALL}")
-            print()
-        
         # Save to file
         try:
             with open("NeighboursCameras_Results.txt", 'w', encoding='utf-8') as f:
@@ -1076,6 +1063,7 @@ def neighbours_camera_scanner():
     print(f"\n{Fore.CYAN}[i] Total IPs scanned: 254{Style.RESET_ALL}")
     print(f"{Fore.CYAN}[i] Cameras found: {len(results)}{Style.RESET_ALL}")
     print(f"{Fore.CYAN}[i] Time taken: {elapsed:.2f} seconds{Style.RESET_ALL}")
+    input(f"\n{Fore.CYAN}Press Enter to continue...{Style.RESET_ALL}")
 
 
 def clear_screen():
@@ -1321,17 +1309,14 @@ def main():
             if choice == '1':
                 # Trace Route
                 trace_route()
-                input(f"\n{Fore.CYAN}Press Enter to continue...{Style.RESET_ALL}")
                 
             elif choice == '2':
                 # Super Fast Scan
                 super_fast_scan()
-                input(f"\n{Fore.CYAN}Press Enter to continue...{Style.RESET_ALL}")
                 
             elif choice == '3':
                 # Neighbours Camera Scanner
                 neighbours_camera_scanner()
-                input(f"\n{Fore.CYAN}Press Enter to continue...{Style.RESET_ALL}")
                 
             elif choice == '4':
                 # Exit
