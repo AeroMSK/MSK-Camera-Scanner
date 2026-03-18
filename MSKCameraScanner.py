@@ -73,9 +73,13 @@ def gradient_text(text, start_color, end_color):
 
 
 def print_banner():
-    """Display main banner with RGB gradient and box border"""
+    """Display main banner with RGB gradient and box border (optimized for Termux)"""
     # Enable ANSI (important for Windows)
     os.system("")
+    
+    # Width optimized for mobile terminals (Termux)
+    width = 60
+    internal_width = width - 2 # 58
     
     # Purple → Blue → Cyan gradient stages
     gradients = [
@@ -92,26 +96,31 @@ def print_banner():
         "╚═╝     ╚═╝ ╚═════╝ ╚══════╝╚═╝ ╚═════╝ ╚═╝  ╚═══╝"
     ]
 
-    # Border color: Green (ANSI)
+    # Colors
     green_border = "\033[92m"
     red_warning = "\033[91m"
     reset = "\033[0m"
 
-    print(f"{green_border}╔" + "═"*70 + "╗")
+    print(f"{green_border}╔" + "═" * internal_width + "╗")
     
     for i, line in enumerate(banner):
         # Alternate gradient direction for more “cyber” feel
         start, end = gradients[i % len(gradients)]
         colored_line = gradient_text(line, start, end)
-        # Pad to 70 chars (internal width)
-        padding = " " * (68 - len(line))
-        print(f"║ {colored_line}{green_border}{padding}║")
+        
+        # Center the logo line
+        left_pad = (internal_width - len(line)) // 2
+        right_pad = internal_width - len(line) - left_pad
+        print(f"║{' ' * left_pad}{colored_line}{green_border}{' ' * right_pad}║")
 
-    print(f"║{' '*70}║")
+    print(f"║{' ' * internal_width}║")
+    
     warning_text = "⚠ WARNING: Do not use this tool without MSK's permission."
-    warning_padding = " " * (68 - len(warning_text))
-    print(f"║ {red_warning}{warning_text}{green_border}{warning_padding}║")
-    print(f"╚" + "═"*70 + f"╝{reset}")
+    w_left_pad = (internal_width - len(warning_text)) // 2
+    w_right_pad = internal_width - len(warning_text) - w_left_pad
+    print(f"║{' ' * w_left_pad}{red_warning}{warning_text}{green_border}{' ' * w_right_pad}║")
+    
+    print(f"╚" + "═" * internal_width + f"╝{reset}")
 
     print(f"{green_border}[*] Developed by: {Fore.YELLOW}MSK{reset}")
     print(f"{green_border}[*] Termux Supported ✓{reset}\n")
