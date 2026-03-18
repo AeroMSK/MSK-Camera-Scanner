@@ -176,6 +176,39 @@ def extract_title(html_content):
         return "Error Extracting Title"
 
 
+def get_camera_type(response_str, title, filter_mode=1):
+    """
+    Fingerprint camera and filter based on user choice.
+    filter_mode: 1 = Show All, 2 = Only WEB, WEB SERVICE, CPlus
+    """
+    t_low = title.lower()
+    r_low = response_str.lower()
+    
+    # Priority Categories (WEB, WEB SERVICE, CPlus)
+    if 'web service' in t_low or '<title>web service</title>' in r_low:
+        return "WEB SERVICE"
+    if 'cplus' in t_low or 'cplus' in r_low or 'c+' in t_low:
+        return "CPlus"
+    if 'web' in t_low:
+        return "WEB"
+    
+    # If mode is 2 (Strict), stop here if no match
+    if filter_mode == 2:
+        return None
+        
+    # Regular detection for "Show All" (Mode 1)
+    if 'login' in t_low:
+        return "Camera - Login"
+    if 'login.asp' in r_low:
+        return "Camera - HIK Vision"
+    if 'dvr' in t_low or 'camera' in t_low:
+        return "Camera - DVR"
+    if 'ipcam' in t_low or 'ip cam' in t_low:
+        return "Camera - IP Camera"
+        
+    return None
+
+
 def trace_route():
     """Trace route to a domain/IP"""
     print(f"\n{Fore.CYAN}{'='*50}{Style.RESET_ALL}")
@@ -259,7 +292,7 @@ def trace_route():
     print(f"\n{Fore.CYAN}{'='*50}{Style.RESET_ALL}")
 
 
-def super_fast_scan(gui_start_ip=None, gui_end_ip=None):
+def super_fast_scan(gui_start_ip=None, gui_end_ip=None, gui_filter_mode=None):
     """Super fast scan with full threading power"""
     print(f"\n{Fore.CYAN}{'='*50}{Style.RESET_ALL}")
     print(f"{Fore.RED}[⚡] SUPER FAST SCAN MODE [⚡]{Style.RESET_ALL}")
@@ -272,24 +305,52 @@ def super_fast_scan(gui_start_ip=None, gui_end_ip=None):
     print(f"  Single IP: 192.168.1.1")
     print(f"  IP Range: 192.168.1.1 to 192.168.1.255\n")
     
-    # Get start IP
+    # Get start IP or CIDR
     if gui_start_ip is not None:
         start_ip = gui_start_ip
         end_ip = gui_end_ip if gui_end_ip is not None else ""
+        filter_mode = gui_filter_mode if gui_filter_mode is not None else 1
     else:
+        print(f"{Fore.CYAN}Options for Scan Output:{Style.RESET_ALL}")
+        print(f"  1. Show all found cameras")
+        print(f"  2. Show only WEB, WEB SERVICE, and CPlus")
+        
         while True:
-            start_ip = input(f"{Fore.GREEN}Enter Start IP: {Style.RESET_ALL}").strip()
+            f_choice = input(f"{Fore.GREEN}Select option (1/2): {Style.RESET_ALL}").strip()
+            if f_choice in ['1', '2']:
+                filter_mode = int(f_choice)
+                break
+            print(f"{Fore.RED}[!] Invalid choice!{Style.RESET_ALL}")
+
+        while True:
+            start_ip = input(f"{Fore.GREEN}Enter Start IP or CIDR (e.g. 192.168.1.0/24): {Style.RESET_ALL}").strip()
+            if '/' in start_ip:
+                try:
+                    ipaddress.IPv4Network(start_ip, strict=False)
+                    break
+                except:
+                    print(f"{Fore.RED}[!] Invalid CIDR format!{Style.RESET_ALL}")
+                    continue
             if not validate_ip(start_ip):
                 print(f"{Fore.RED}[!] Invalid IP address format!{Style.RESET_ALL}")
                 continue
             break
         
-        # Get end IP (optional)
-        end_ip = input(f"{Fore.GREEN}Enter End IP (press Enter for single IP): {Style.RESET_ALL}").strip()
+        # Get end IP (only if no CIDR)
+        if '/' not in start_ip:
+            end_ip = input(f"{Fore.GREEN}Enter End IP (press Enter for single IP): {Style.RESET_ALL}").strip()
+        else:
+            end_ip = ""
     
     # Generate IP list
     ip_list = []
-    if not end_ip:
+    if '/' in start_ip:
+        try:
+            network = ipaddress.IPv4Network(start_ip, strict=False)
+            ip_list = [str(ip) for ip in network]
+        except:
+            ip_list = [start_ip.split('/')[0]]
+    elif not end_ip:
         ip_list = [start_ip]
     else:
         if not validate_ip(end_ip):
@@ -369,22 +430,8 @@ def super_fast_scan(gui_start_ip=None, gui_end_ip=None):
                                 
                                 url = f"http://{ip}:{port}" if port != 80 else f"http://{ip}"
                                 
-                                # Detect camera type based on title and content
-                                camera_type = None
-                                title_lower = title.lower()
-                                
-                                if 'web service' in title_lower or '<title>WEB SERVICE</title>' in response_str:
-                                    camera_type = "Camera - WEB SERVICE"
-                                elif 'web' in title_lower:
-                                    camera_type = "Camera - WEB"
-                                elif 'login' in title_lower:
-                                    camera_type = "Camera - Login"
-                                elif 'login.asp' in response_str:
-                                    camera_type = "Camera - HIK Vision"
-                                elif 'dvr' in title_lower or 'camera' in title_lower:
-                                    camera_type = "Camera - DVR"
-                                elif 'ipcam' in title_lower or 'ip cam' in title_lower:
-                                    camera_type = "Camera - IP Camera"
+                                # Detect camera type with filtering
+                                camera_type = get_camera_type(response_str, title, filter_mode if 'filter_mode' in locals() else 1)
                                 
                                 # Only save and display if it's a camera (not regular web server)
                                 if camera_type:
@@ -904,18 +951,23 @@ def run_gui():
         run_in_thread(trace_route)
 
     def do_super_fast_scan():
-        start_ip = simpledialog.askstring("Input", "Enter Start IP:\n(e.g., 192.168.1.1)", parent=root)
+        filter_mode = simpledialog.askinteger("Option", "Select Mode:\n1. Show All\n2. Show WEB, WEB SERVICE, and CPlus", parent=root, minvalue=1, maxvalue=2)
+        if filter_mode is None: return
+        
+        start_ip = simpledialog.askstring("Input", "Enter Start IP or CIDR:\n(e.g., 192.168.1.1 or 192.168.1.0/24)", parent=root)
         if not start_ip: return
-        if not validate_ip(start_ip.strip()):
-            messagebox.showerror("Error", "Invalid IP address format!")
-            return
+        
+        end_ip = ""
+        if '/' not in start_ip:
+            if not validate_ip(start_ip.strip()):
+                messagebox.showerror("Error", "Invalid IP address format!")
+                return
+            end_ip = simpledialog.askstring("Input", "Enter End IP (Optional):\nLeave blank for single IP:", parent=root)
+            if end_ip and not validate_ip(end_ip.strip()):
+                messagebox.showerror("Error", "Invalid IP address format!")
+                return
             
-        end_ip = simpledialog.askstring("Input", "Enter End IP (Optional):\nLeave blank for single IP:", parent=root)
-        if end_ip and not validate_ip(end_ip.strip()):
-            messagebox.showerror("Error", "Invalid IP address format!")
-            return
-            
-        run_in_thread(super_fast_scan, start_ip.strip(), end_ip.strip() if end_ip else "")
+        run_in_thread(super_fast_scan, start_ip.strip(), end_ip.strip() if end_ip else "", filter_mode)
 
     def do_neighbours_camera_scanner():
         run_in_thread(neighbours_camera_scanner)
