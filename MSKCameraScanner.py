@@ -23,6 +23,7 @@ import multiprocessing
 import subprocess
 import platform
 import random
+import base64
 
 # Try to import colorama, but work without it (Termux compatibility)
 try:
@@ -64,9 +65,10 @@ DEFAULT_CREDENTIALS = [
 
 
 class CameraValidator:
-    """Universal camera validator with auth-scheme detection"""
+    """Universal camera validator with robust multi-auth and RTSP support"""
     HIK_PATH = "/ISAPI/System/deviceInfo"
     DAHUA_PATH = "/cgi-bin/magicBox.cgi?action=getDeviceType"
+    RTSP_PORT = 554
     
     def __init__(self, ip, username, password, port=80):
         self.ip = ip
@@ -74,8 +76,6 @@ class CameraValidator:
         self.password = password
         self.port = port
         self.timeout = 3.0
-        self.session = requests.Session()
-        self.session.verify = False
 
     def validate(self, hint=None):
         if not HAS_REQUESTS:
@@ -83,41 +83,72 @@ class CameraValidator:
         
         url_base = f"http://{self.ip}:{self.port}"
         
-        # 1. Detect Auth Scheme and Brand
-        try:
-            # Try Hikvision path first by default as probe
-            probe_url = url_base + self.HIK_PATH
-            response = self.session.get(probe_url, timeout=self.timeout, allow_redirects=False)
-            
-            auth_header = response.headers.get('WWW-Authenticate', '').lower()
-            use_digest = 'digest' in auth_header
-            
-            # 2. Try Authenticated Request
-            paths_to_try = []
-            if hint == "Hikvision" or "hik" in auth_header:
-                paths_to_try = [self.HIK_PATH, self.DAHUA_PATH]
-            elif hint == "Dahua" or "dahua" in auth_header or "web service" in auth_header:
-                paths_to_try = [self.DAHUA_PATH, self.HIK_PATH]
-            else:
-                paths_to_try = [self.HIK_PATH, self.DAHUA_PATH]
-
-            for path in paths_to_try:
-                url = url_base + path
-                auth = HTTPDigestAuth(self.username, self.password) if use_digest else (self.username, self.password)
-                
-                try:
-                    resp = self.session.get(url, auth=auth, timeout=self.timeout, allow_redirects=False)
-                    if resp.status_code == 200:
-                        return True, f"Authenticated via {'Digest' if use_digest else 'Basic'} on {path}"
-                except:
-                    continue
+        # 1. Try Hikvision ISAPI (Common)
+        success, msg = self._try_http(url_base + self.HIK_PATH, "Hikvision")
+        if success: return True, msg
+        
+        # 2. Try Dahua CGI
+        success, msg = self._try_http(url_base + self.DAHUA_PATH, "Dahua")
+        if success: return True, msg
+        
+        # 3. Try Dahua/Anjhua RTSP (Port 554)
+        success, msg = self._try_rtsp()
+        if success: return True, msg
                     
-            return False, "Authentication failed (Wrong credentials or scheme)"
+        return False, "All validation methods failed"
+
+    def _try_http(self, url, label):
+        """Try both Digest and Basic auth on a URL"""
+        # Try Digest first
+        try:
+            resp = requests.get(url, auth=HTTPDigestAuth(self.username, self.password), 
+                               timeout=self.timeout, verify=False, allow_redirects=False)
+            if resp.status_code == 200:
+                return True, f"{label} (Digest Auth)"
+        except:
+            pass
             
-        except requests.exceptions.Timeout:
-            return False, "Connection timeout"
-        except Exception as e:
-            return False, str(e)
+        # Try Basic if Digest didn't work (or skipped)
+        try:
+            resp = requests.get(url, auth=(self.username, self.password), 
+                               timeout=self.timeout, verify=False, allow_redirects=False)
+            if resp.status_code == 200:
+                return True, f"{label} (Basic Auth)"
+        except:
+            pass
+            
+        return False, "Failed"
+
+    def _try_rtsp(self):
+        """Attempt RTSP DESCRIBE with Basic Auth"""
+        sock = None
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(self.timeout)
+            sock.connect((self.ip, self.RTSP_PORT))
+            
+            # Common RTSP path for Dahua
+            rtsp_url = f"rtsp://{self.ip}:{self.RTSP_PORT}/cam/realmonitor?channel=1&subtype=0"
+            auth_str = base64.b64encode(f"{self.username}:{self.password}".encode()).decode()
+            
+            request = (
+                f"DESCRIBE {rtsp_url} RTSP/1.0\r\n"
+                f"CSeq: 1\r\n"
+                f"Authorization: Basic {auth_str}\r\n"
+                "\r\n"
+            )
+            
+            sock.send(request.encode())
+            response = sock.recv(4096).decode(errors='ignore')
+            
+            if "200 OK" in response:
+                return True, "Dahua RTSP (Basic Auth)"
+        except:
+            pass
+        finally:
+            if sock: sock.close()
+            
+        return False, "Failed"
 
 
 # Keep old names for compatibility if needed, but point to new logic
