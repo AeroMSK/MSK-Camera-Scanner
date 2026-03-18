@@ -173,6 +173,14 @@ detected_ips = set()
 stop_scan = False
 pause_scan = False
 
+# Thread-safety for printing
+print_lock = threading.Lock()
+
+def safe_print(msg, color=Fore.GREEN, end='\n'):
+    """Thread-safe printer"""
+    with print_lock:
+        print(f"{color}{msg}{Style.RESET_ALL}", end=end)
+
 
 def print_banner():
     """Display main banner with hacking green colors and box border (optimized for Termux)"""
@@ -298,58 +306,6 @@ def extract_title(html_content):
         return "No Title Found"
     except:
         return "Error Extracting Title"
-
-
-def typing_print(text, speed=0.005):
-    """Prints text character by character for a cinematic effect"""
-    for char in text:
-        sys.stdout.write(char)
-        sys.stdout.flush()
-        time.sleep(speed)
-    print()
-
-
-def glitch_intro():
-    """Short glitch-like effect before clearing the screen"""
-    chars = "!@#$%^&*()_+{}[]|;:,.<>?"
-    for _ in range(5):
-        glitch = "".join(random.choice(chars) for _ in range(60))
-        sys.stdout.write(f"\r{Fore.GREEN}{glitch}{Style.RESET_ALL}")
-        sys.stdout.flush()
-        time.sleep(0.04)
-    sys.stdout.write("\r" + " " * 60 + "\r")
-
-
-def loading_spinner(duration=0.8, task="Initializing"):
-    """Animated loading spinner for transitions"""
-    spinner = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
-    end_time = time.time() + duration
-    while time.time() < end_time:
-        for char in spinner:
-            sys.stdout.write(f"\r{Fore.GREEN}[*] {task}... {char}{Style.RESET_ALL}")
-            sys.stdout.flush()
-            time.sleep(0.08)
-    sys.stdout.write("\r" + " " * 60 + "\r")
-
-
-def typing_print(text, speed=0.005):
-    """Prints text character by character for a cinematic effect"""
-    for char in text:
-        sys.stdout.write(char)
-        sys.stdout.flush()
-        time.sleep(speed)
-    print()
-
-
-def glitch_intro():
-    """Short glitch-like effect before clearing the screen"""
-    chars = "!@#$%^&*()_+{}[]|;:,.<>?"
-    for _ in range(5):
-        glitch = "".join(random.choice(chars) for _ in range(60))
-        sys.stdout.write(f"\r{Fore.GREEN}{glitch}{Style.RESET_ALL}")
-        sys.stdout.flush()
-        time.sleep(0.04)
-    sys.stdout.write("\r" + " " * 60 + "\r")
 
 
 def loading_spinner(duration=0.8, task="Initializing"):
@@ -531,32 +487,43 @@ def super_fast_scan(gui_start_ip=None, gui_end_ip=None, gui_filter_mode=None):
         else:
             end_ip = ""
     
-    # Generate IP list
-    ip_list = []
-    if '/' in start_ip:
-        try:
-            network = ipaddress.IPv4Network(start_ip, strict=False)
-            ip_list = [str(ip) for ip in network]
-        except:
-            ip_list = [start_ip.split('/')[0]]
-    elif not end_ip:
-        ip_list = [start_ip]
-    else:
-        if not validate_ip(end_ip):
-            print(f"{Fore.RED}[!] Invalid End IP! Scanning single IP only.{Style.RESET_ALL}")
-            ip_list = [start_ip]
+    # Generate IP generator (memory efficient)
+    def ip_generator():
+        if '/' in start_ip:
+            try:
+                network = ipaddress.IPv4Network(start_ip, strict=False)
+                for ip in network:
+                    yield str(ip)
+            except:
+                yield start_ip.split('/')[0]
+        elif not end_ip:
+            yield start_ip
         else:
-            start_int = int(ipaddress.IPv4Address(start_ip))
-            end_int = int(ipaddress.IPv4Address(end_ip))
-            
-            if start_int > end_int:
-                print(f"{Fore.RED}[!] Start IP must be less than End IP!{Style.RESET_ALL}")
-                ip_list = [start_ip]
+            if not validate_ip(end_ip):
+                yield start_ip
             else:
-                for ip_int in range(start_int, end_int + 1):
-                    ip_list.append(str(ipaddress.IPv4Address(ip_int)))
+                start_int = int(ipaddress.IPv4Address(start_ip))
+                end_int = int(ipaddress.IPv4Address(end_ip))
+                
+                if start_int > end_int:
+                    yield start_ip
+                else:
+                    for ip_int in range(start_int, end_int + 1):
+                        yield str(ipaddress.IPv4Address(ip_int))
+
+    # Calculate count for display (still useful, but avoid list materialization if possible)
+    # If network is too large, we just say "Large Subnet"
+    try:
+        if '/' in start_ip:
+            total_count = ipaddress.IPv4Network(start_ip, strict=False).num_addresses
+        elif not end_ip:
+            total_count = 1
+        else:
+            total_count = int(ipaddress.IPv4Address(end_ip)) - int(ipaddress.IPv4Address(start_ip)) + 1
+    except:
+        total_count = "Unknown"
     
-    print(f"\n{Fore.GREEN}[✓] Total IPs to scan: {len(ip_list)}{Style.RESET_ALL}")
+    print(f"\n{Fore.GREEN}[✓] Total IPs to scan: {total_count}{Style.RESET_ALL}")
     
     # Auto-detect optimal thread count
     cpu_count = multiprocessing.cpu_count()
@@ -582,67 +549,54 @@ def super_fast_scan(gui_start_ip=None, gui_end_ip=None, gui_filter_mode=None):
                 try:
                     # Ultra-fast port check
                     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                    sock.settimeout(0.5)  # Super fast timeout
+                    sock.settimeout(0.5)
                     result = sock.connect_ex((ip, port))
                     sock.close()
                     
                     if result == 0:
                         # Port is open, get HTTP data
+                        response = b''
                         try:
                             http_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                            http_sock.settimeout(1)
+                            http_sock.settimeout(1.2)
                             http_sock.connect((ip, port))
                             
                             request = f'GET / HTTP/1.1\r\nHost: {ip}\r\nConnection: close\r\n\r\n'
                             http_sock.send(request.encode())
                             
-                            response = b''
-                            http_sock.settimeout(2)
+                            http_sock.settimeout(2.0)
                             while True:
-                                try:
-                                    data = http_sock.recv(4096)
-                                    if not data:
-                                        break
-                                    response += data
-                                    if len(response) > 30000:
-                                        break
-                                except:
-                                    break
-                            
+                                data = http_sock.recv(4096)
+                                if not data: break
+                                response += data
+                                if len(response) > 30000: break
                             http_sock.close()
-                            
-                            if response:
-                                response_str = response.decode('utf-8', errors='ignore')
-                                title = extract_title(response_str)
-                                
-                                # Server header
-                                server_match = re.search(r'Server: ([^\r\n]+)', response_str, re.IGNORECASE)
-                                server = server_match.group(1) if server_match else "Unknown"
-                                
-                                url = f"http://{ip}:{port}" if port != 80 else f"http://{ip}"
-                                
-                                # Detect camera type with filtering
-                                camera_type = get_camera_type(response_str, title, filter_mode if 'filter_mode' in locals() else 1)
-                                
-                                # Only save and display if it's a camera (not regular web server)
-                                if camera_type:
-                                    with results_lock:
-                                        results.append({
-                                            'ip': ip,
-                                            'port': port,
-                                            'title': title,
-                                            'server': server,
-                                            'url': url,
-                                            'type': camera_type
-                                        })
-                                        print(f"{Fore.GREEN}[✓] Camera Found: {ip}:{port} - {title[:40]}{Style.RESET_ALL}")
                         except:
-                            pass
+                            if 'http_sock' in locals(): http_sock.close()
+                        
+                        if response:
+                            response_str = response.decode('utf-8', errors='ignore')
+                            title = extract_title(response_str)
+                            
+                            server_match = re.search(r'Server: ([^\r\n]+)', response_str, re.IGNORECASE)
+                            server = server_match.group(1) if server_match else "Unknown"
+                            
+                            url = f"http://{ip}:{port}" if port != 80 else f"http://{ip}"
+                            camera_type = get_camera_type(response_str, title, filter_mode if 'filter_mode' in locals() else 1)
+                            
+                            if camera_type:
+                                with results_lock:
+                                    results.append({
+                                        'ip': ip, 'port': port, 'title': title,
+                                        'server': server, 'url': url, 'type': camera_type
+                                    })
+                                    safe_print(f"[✓] Camera Found: {ip}:{port} - {title[:40]}", Fore.GREEN)
                 except:
                     pass
                 
                 scan_queue.task_done()
             except:
+                # Queue empty or timeout
                 break
     
     # Start threads
@@ -652,9 +606,9 @@ def super_fast_scan(gui_start_ip=None, gui_end_ip=None, gui_filter_mode=None):
         t.start()
         threads.append(t)
     
-    # Queue all IP:port combinations
+    # Queue all IP:port combinations using the generator
     start_time = time.time()
-    for ip in ip_list:
+    for ip in ip_generator():
         for port in ports:
             scan_queue.put((ip, port))
     
@@ -711,7 +665,7 @@ def brute_force_cameras(camera_list, output_widget=None):
             output_widget.insert('end', msg + "\n")
             output_widget.see('end')
         else:
-            print(f"{color}{msg}{Style.RESET_ALL}")
+            safe_print(msg, color)
 
     if not camera_list:
         log("[-] No cameras to test.", Fore.YELLOW)
@@ -777,14 +731,14 @@ def scan(ip, port):
                     detected_ips.add(ip)
                     camera_type = "Anjhua-Dahua Technology Camera"
                     camera_found = True
-                    print(f"{Fore.GREEN}[✓] {camera_type} Found!{Style.RESET_ALL} at {Fore.CYAN}{url}{Style.RESET_ALL}")
+                    safe_print(f"[✓] {camera_type} Found! at {url}", Fore.GREEN)
                     
             elif 'HTTP' in response and 'login.asp' in response:
                 if ip not in detected_ips:
                     detected_ips.add(ip)
                     camera_type = "HIK Vision Camera"
                     camera_found = True
-                    print(f"{Fore.RED}[✓] {camera_type} Found!{Style.RESET_ALL} at {Fore.CYAN}{url}{Style.RESET_ALL}")
+                    safe_print(f"[✓] {camera_type} Found! at {url}", Fore.RED)
             
             # Live save to file
             if camera_found:
@@ -943,34 +897,34 @@ def is_rtsp(ip):
 
 def dahua_name(ip):
     """Get Dahua camera name"""
+    sock = None
     try:
-        s = socket.socket()
-        s.settimeout(0.5)
-        s.connect((ip, 37777))
-        data = s.recv(512).decode(errors="ignore")
-        s.close()
-        
+        sock = socket.socket()
+        sock.settimeout(0.5)
+        sock.connect((ip, 37777))
+        data = sock.recv(512).decode(errors="ignore")
         m = re.search(r"DH-[A-Z0-9\-]+", data)
-        if m:
-            return m.group(0)
+        if m: return m.group(0)
     except:
         pass
+    finally:
+        if sock: sock.close()
     return None
 
 
 def hikvision_name(ip):
     """Get Hikvision camera name"""
+    sock = None
     try:
-        s = socket.socket()
-        s.settimeout(0.5)
-        s.connect((ip, 8000))
-        data = s.recv(512).decode(errors="ignore")
-        s.close()
-        
-        if "Hikvision" in data:
-            return "HIKVISION CAMERA"
+        sock = socket.socket()
+        sock.settimeout(0.5)
+        sock.connect((ip, 8000))
+        data = sock.recv(512).decode(errors="ignore")
+        if "Hikvision" in data: return "HIKVISION CAMERA"
     except:
         pass
+    finally:
+        if sock: sock.close()
     return None
 
 
@@ -991,7 +945,7 @@ def scan_rtsp_ip(ip, results, results_lock):
             'name': name,
             'rtsp_url': f"rtsp://{ip}:554"
         })
-        print(f"{Fore.GREEN}[✓] Camera Found: {ip} - {name}{Style.RESET_ALL}")
+        safe_print(f"[✓] Camera Found: {ip} - {name}", Fore.GREEN)
 
 
 def neighbours_camera_scanner():
@@ -1085,7 +1039,7 @@ def print_menu():
     ]
     
     for op in menu_ops:
-        typing_print(op, 0.005)
+        print(op)
         
     print(f"{Fore.CYAN}{'='*50}{Style.RESET_ALL}\n")
 
