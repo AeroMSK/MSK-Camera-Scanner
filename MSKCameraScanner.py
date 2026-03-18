@@ -55,32 +55,66 @@ stop_scan = False
 pause_scan = False
 
 
-def print_banner():
-    """Display main banner"""
-    print(f"{Fore.RED}⚠️ WARNING: Do not use this tool without MSK's permission.{Style.RESET_ALL}")
+def gradient_text(text, start_color, end_color):
+    """Generate RGB gradient text using ANSI escape codes"""
+    result = ""
+    length = len(text)
+    if length == 0: return text
     
-    # Exact gradient colors row by row for CLI
-    m = Fore.MAGENTA
-    b = Fore.BLUE
-    c = Fore.CYAN
-    g = Fore.GREEN
-    w = Fore.CYAN  # Border color from image
-    r = Style.RESET_ALL
+    for i, char in enumerate(text):
+        # Calculate intermediate RGB values
+        r = int(start_color[0] + (end_color[0] - start_color[0]) * i / length)
+        g = int(start_color[1] + (end_color[1] - start_color[1]) * i / length)
+        b = int(start_color[2] + (end_color[2] - start_color[2]) * i / length)
+        
+        result += f"\033[38;2;{r};{g};{b}m{char}"
+    
+    return result
 
-    musion_logo = f"""{w}
-╔═════════════════════════════════════════════════════════════════╗
-║                                                                 ║
-║   {m}███╗   ███╗{m}██╗   ██╗{b}███████╗{b}██╗ {c}██████╗ {g}███╗   ██╗            {w}║
-║   {m}████╗ ████║{m}██║   ██║{b}██╔════╝{b}██║{c}██╔═══██╗{g}████╗  ██║            {w}║
-║   {m}██╔████╔██║{m}██║   ██║{b}███████╗{b}██║{c}██║   ██║{g}██╔██╗ ██║            {w}║
-║   {m}██║╚██╔╝██║{m}██║   ██║{b}╚════██║{b}██║{c}██║   ██║{g}██║╚██╗██║            {w}║
-║   {m}██║ ╚═╝ ██║{m}╚██████╔╝{b}███████║{b}██║{c}╚██████╔╝{g}██║ ╚████║            {w}║
-║   {m}╚═╝     ╚═╝ {m}╚═════╝ {b}╚══════╝{b}╚═╝ {c}╚═════╝ {g}╚═╝  ╚═══╝            {w}║
-║                                                                 ║
-╚═════════════════════════════════════════════════════════════════╝{r}"""
-    print(musion_logo)
-    print(f"{Fore.GREEN}[*] Developed by: {Fore.YELLOW}MSK{Style.RESET_ALL}")
-    print(f"{Fore.GREEN}[*] Termux Supported ✓{Style.RESET_ALL}\n")
+
+def print_banner():
+    """Display main banner with RGB gradient and box border"""
+    # Enable ANSI (important for Windows)
+    os.system("")
+    
+    # Purple → Blue → Cyan gradient stages
+    gradients = [
+        ((180, 0, 255), (0, 100, 255)),   # purple → blue
+        ((0, 100, 255), (0, 255, 200)),   # blue → cyan
+    ]
+
+    banner = [
+        "███╗   ███╗██╗   ██╗███████╗██╗ ██████╗ ███╗   ██╗",
+        "████╗ ████║██║   ██║██╔════╝██║██╔═══██╗████╗  ██║",
+        "██╔████╔██║██║   ██║███████╗██║██║   ██║██╔██╗ ██║",
+        "██║╚██╔╝██║██║   ██║╚════██║██║██║   ██║██║╚██╗██║",
+        "██║ ╚═╝ ██║╚██████╔╝███████║██║╚██████╔╝██║ ╚████║",
+        "╚═╝     ╚═╝ ╚═════╝ ╚══════╝╚═╝ ╚═════╝ ╚═╝  ╚═══╝"
+    ]
+
+    # Border color: Green (ANSI)
+    green_border = "\033[92m"
+    red_warning = "\033[91m"
+    reset = "\033[0m"
+
+    print(f"{green_border}╔" + "═"*70 + "╗")
+    
+    for i, line in enumerate(banner):
+        # Alternate gradient direction for more “cyber” feel
+        start, end = gradients[i % len(gradients)]
+        colored_line = gradient_text(line, start, end)
+        # Pad to 70 chars (internal width)
+        padding = " " * (68 - len(line))
+        print(f"║ {colored_line}{green_border}{padding}║")
+
+    print(f"║{' '*70}║")
+    warning_text = "⚠ WARNING: Do not use this tool without MSK's permission."
+    warning_padding = " " * (68 - len(warning_text))
+    print(f"║ {red_warning}{warning_text}{green_border}{warning_padding}║")
+    print(f"╚" + "═"*70 + f"╝{reset}")
+
+    print(f"{green_border}[*] Developed by: {Fore.YELLOW}MSK{reset}")
+    print(f"{green_border}[*] Termux Supported ✓{reset}\n")
 def validate_ip(ip_str):
     """Validate IP address format"""
     try:
@@ -835,14 +869,14 @@ def run_gui():
 ╚═════════════════════════════════════════════════════════════════╝"""
     txt_logo.insert(tk.END, musion_text)
     
-    # Exact gradient colors from image
-    txt_logo.tag_config("magenta", foreground="#FF00FF") # Pink (Top M)
-    txt_logo.tag_config("purple", foreground="#BF00FF")  # Purple (Bottom M / U)
-    txt_logo.tag_config("blue", foreground="#0080FF")    # Blue (S)
-    txt_logo.tag_config("cyan", foreground="#00FFFF")    # Cyan (I / O)
-    txt_logo.tag_config("teal", foreground="#00FFAA")    # Teal (N)
-    txt_logo.tag_config("green", foreground="#00FF00")   # Green (End of N)
-    txt_logo.tag_config("border", foreground="#00FFFF")  # Cyan Border
+    # Exact gradient colors from image (Purple -> Blue -> Cyan)
+    txt_logo.tag_config("magenta", foreground="#B400FF") # Purple/Pink
+    txt_logo.tag_config("purple", foreground="#8000FF")  # Deep Purple
+    txt_logo.tag_config("blue", foreground="#0064FF")    # Blue
+    txt_logo.tag_config("cyan", foreground="#00FFC8")    # Cyan
+    txt_logo.tag_config("teal", foreground="#00FFAA")    # Teal
+    txt_logo.tag_config("green", foreground="#00FF00")   # Green
+    txt_logo.tag_config("border", foreground="#00FF00")  # Green Border from the prompt
     
     txt_logo.tag_add("border", "1.0", tk.END)
     for l in range(3, 9):
