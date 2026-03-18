@@ -58,12 +58,27 @@ pause_scan = False
 def print_banner():
     """Display main banner"""
     print(f"{Fore.RED}⚠️ WARNING: Do not use this tool without MSK's permission.{Style.RESET_ALL}")
-    banner = f"""
-==============================
-      MSK CAMERA SCANNER
-==============================
-"""
-    print(f"{Fore.GREEN}{banner}{Style.RESET_ALL}")
+    
+    # Exact gradient colors row by row for CLI
+    m = Fore.MAGENTA
+    b = Fore.BLUE
+    c = Fore.CYAN
+    g = Fore.GREEN
+    w = Fore.CYAN  # Border color from image
+    r = Style.RESET_ALL
+
+    musion_logo = f"""{w}
+╔═════════════════════════════════════════════════════════════════╗
+║                                                                 ║
+║   {m}███╗   ███╗{m}██╗   ██╗{b}███████╗{b}██╗ {c}██████╗ {g}███╗   ██╗            {w}║
+║   {m}████╗ ████║{m}██║   ██║{b}██╔════╝{b}██║{c}██╔═══██╗{g}████╗  ██║            {w}║
+║   {m}██╔████╔██║{m}██║   ██║{b}███████╗{b}██║{c}██║   ██║{g}██╔██╗ ██║            {w}║
+║   {m}██║╚██╔╝██║{m}██║   ██║{b}╚════██║{b}██║{c}██║   ██║{g}██║╚██╗██║            {w}║
+║   {m}██║ ╚═╝ ██║{m}╚██████╔╝{b}███████║{b}██║{c}╚██████╔╝{g}██║ ╚████║            {w}║
+║   {m}╚═╝     ╚═╝ {m}╚═════╝ {b}╚══════╝{b}╚═╝ {c}╚═════╝ {g}╚═╝  ╚═══╝            {w}║
+║                                                                 ║
+╚═════════════════════════════════════════════════════════════════╝{r}"""
+    print(musion_logo)
     print(f"{Fore.GREEN}[*] Developed by: {Fore.YELLOW}MSK{Style.RESET_ALL}")
     print(f"{Fore.GREEN}[*] Termux Supported ✓{Style.RESET_ALL}\n")
 def validate_ip(ip_str):
@@ -800,9 +815,55 @@ def run_gui():
                            fg="yellow", bg="black", font=("Consolas", 12, "bold"))
     warning_lbl.pack(pady=10)
 
+    # MUSION Logo for GUI (using Text for gradient)
+    logo_frame = tk.Frame(root, bg="black")
+    logo_frame.pack(pady=5)
+    
+    txt_logo = tk.Text(logo_frame, bg="black", fg="white", font=("Consolas", 6),
+                       height=10, width=70, relief=tk.FLAT, highlightthickness=0)
+    txt_logo.pack()
+
+    musion_text = """╔═════════════════════════════════════════════════════════════════╗
+║                                                                 ║
+║   ███╗   ███╗██╗   ██╗███████╗██╗ ██████╗ ███╗   ██╗            ║
+║   ████╗ ████║██║   ██║██╔════╝██║██╔═══██╗████╗  ██║            ║
+║   ██╔████╔██║██║   ██║███████╗██║██║   ██║██╔██╗ ██║            ║
+║   ██║╚██╔╝██║██║   ██║╚════██║██║██║   ██║██║╚██╗██║            ║
+║   ██║ ╚═╝ ██║╚██████╔╝███████║██║╚██████╔╝██║ ╚████║            ║
+║   ╚═╝     ╚═╝ ╚═════╝ ╚══════╝╚═╝ ╚═════╝ ╚═╝  ╚═══╝            ║
+║                                                                 ║
+╚═════════════════════════════════════════════════════════════════╝"""
+    txt_logo.insert(tk.END, musion_text)
+    
+    # Exact gradient colors from image
+    txt_logo.tag_config("magenta", foreground="#FF00FF") # Pink (Top M)
+    txt_logo.tag_config("purple", foreground="#BF00FF")  # Purple (Bottom M / U)
+    txt_logo.tag_config("blue", foreground="#0080FF")    # Blue (S)
+    txt_logo.tag_config("cyan", foreground="#00FFFF")    # Cyan (I / O)
+    txt_logo.tag_config("teal", foreground="#00FFAA")    # Teal (N)
+    txt_logo.tag_config("green", foreground="#00FF00")   # Green (End of N)
+    txt_logo.tag_config("border", foreground="#00FFFF")  # Cyan Border
+    
+    txt_logo.tag_add("border", "1.0", tk.END)
+    for l in range(3, 9):
+        # M: Pink to Purple gradient
+        txt_logo.tag_add("magenta" if l < 6 else "purple", f"{l}.4", f"{l}.15")
+        # U: Purple to Blue gradient
+        txt_logo.tag_add("purple" if l < 6 else "blue", f"{l}.15", f"{l}.24")
+        # S: Blue to Cyan gradient
+        txt_logo.tag_add("blue" if l < 6 else "cyan", f"{l}.24", f"{l}.33")
+        # I: Cyan
+        txt_logo.tag_add("cyan", f"{l}.33", f"{l}.36")
+        # O: Cyan to Teal gradient
+        txt_logo.tag_add("cyan" if l < 6 else "teal", f"{l}.36", f"{l}.46")
+        # N: Teal to Green gradient
+        txt_logo.tag_add("teal" if l < 6 else "green", f"{l}.46", f"{l}.58")
+
+    txt_logo.config(state=tk.DISABLED)
+
     # Title Label
-    title_lbl = tk.Label(root, text="==============================\n   MSK CAMERA SCANNER\n==============================\nDeveloped by MSK",
-                         fg=fg_color, bg="black", font=("Consolas", 14, "bold"))
+    title_lbl = tk.Label(root, text="MSK CAMERA SCANNER - Developed by MSK",
+                         fg=fg_color, bg="black", font=("Consolas", 12, "bold"))
     title_lbl.pack(pady=5)
 
     # Output text area
