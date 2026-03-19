@@ -134,32 +134,68 @@ class CameraValidator:
         if not HAS_REQUESTS:
             return False, "requests library not installed"
 
-        # Pre-detect brand using an unauthenticated probe (no credentials wasted)
-        # Returns: "hikvision", "dahua", "generic", or None (unreachable)
+        # --- Hint-accelerated path ---
+        # If we already know the brand from the scan, skip re-detection and go
+        # straight to the right endpoints.  This avoids a second network probe
+        # and prevents "Camera unreachable" failures caused by timing differences
+        # between the scan and the credential-test phase.
+        if hint:
+            hint_low = str(hint).lower()
+            if "hikvision" in hint_low or "hik" in hint_low:
+                # Try HIK-specific endpoints first
+                for suffix, markers in self.HIK_ENDPOINTS:
+                    for base in self._bases:
+                        ok, msg = self._check_endpoint(base + suffix, markers, "Hikvision")
+                        if ok: return True, msg
+                # If HIK endpoints return 401 (wrong creds) stop here
+                # If they just 404, fall through to generic snapshot/RTSP
+                for path in self.SNAPSHOT_PATHS:
+                    ok, msg = self._check_snapshot(self._bases[0] + path)
+                    if ok: return True, msg
+                ok, msg = self._try_rtsp()
+                if ok: return True, msg
+                return False, "Wrong credentials or HIK endpoint absent"
+
+            if "dahua" in hint_low or "web service" in hint_low or "anjhua" in hint_low:
+                for suffix, markers in self.DAHUA_ENDPOINTS:
+                    for base in self._bases:
+                        ok, msg = self._check_endpoint(base + suffix, markers, "Dahua")
+                        if ok: return True, msg
+                ok, msg = self._try_rtsp()
+                if ok: return True, msg
+                return False, "Wrong credentials or Dahua endpoint absent"
+
+            # For any other hinted type (generic IP cam, WEB, etc.) fall through
+            # to brand auto-detection below
+
+        # --- Auto-detect brand (used when hint is absent or was generic) ---
         brand = self._detect_brand()
+
+        if brand is None:
+            # Camera didn't respond to this probe at all.
+            # If we have a hint, trust the scan and try generic endpoints anyway.
+            if hint:
+                brand = "generic"
+            else:
+                return False, "Camera unreachable"
 
         if brand == "hikvision":
             for suffix, markers in self.HIK_ENDPOINTS:
                 for base in self._bases:
                     ok, msg = self._check_endpoint(base + suffix, markers, "Hikvision")
                     if ok: return True, msg
-            # If HIK-specific check fails, the brand detection might have been a false positive.
-            # Fallback to generic checks to ensure we don't miss anything.
-            brand = "generic"
+            brand = "generic"  # HIK endpoints absent → try generic
 
         if brand == "dahua":
             for suffix, markers in self.DAHUA_ENDPOINTS:
                 for base in self._bases:
                     ok, msg = self._check_endpoint(base + suffix, markers, "Dahua")
                     if ok: return True, msg
-            # RTSP fallback for Dahua
             ok, msg = self._try_rtsp()
             if ok: return True, msg
-            # Fallback to generic
             brand = "generic"
 
         if brand == "generic":
-            # Try both brands (unknown type) + snapshot
             for suffix, markers in self.HIK_ENDPOINTS:
                 ok, msg = self._check_endpoint(self._bases[0] + suffix, markers, "Hikvision")
                 if ok: return True, msg
@@ -173,9 +209,7 @@ class CameraValidator:
             if ok: return True, msg
             return False, "No match"
 
-        else:
-            # brand is None = camera didn't respond at all — skip immediately
-            return False, "Camera unreachable"
+        return False, "Camera unreachable"
 
     # ── helpers ──────────────────────────────────────────────────────────
 
@@ -527,12 +561,30 @@ def get_camera_type(response_str, title, filter_mode=1):
     
     # Major Brands
     if not camera_found:
-        # iVMS-style Hikvision: SeaJS + AngularJS loginController fingerprint
-        # These cameras redirect to /doc/page/login.asp with SeaJS module loader
-        if 'doc/page/login.asp' in r_low or 'seajs' in r_low or ('logincontroller' in r_low and 'sea-config' in r_low):
-            cam_type = "HIKVISION"
-            camera_found = True
-        elif 'hikvision' in r_low or 'hikvision' in t_low or '/isapi/' in r_low:
+        # --- Hikvision detection (strict multi-signal fingerprinting) ---
+        #
+        # We intentionally require STRONG signals to avoid false positives.
+        # Rules, in priority order:
+        #   A) Explicit brand name anywhere in body/title
+        #   B) /isapi/ path in body (Hikvision-specific API namespace)
+        #   C) iVMS-4200 JS-redirect fingerprint:
+        #       MUST have 'doc/page/login.asp' in body AND at least one of:
+        #       'seajs' OR 'sea-config' OR 'logincontroller' in the SAME body.
+        #       (SeaJS alone and logincontroller alone are too generic to trust.)
+        #   D) ISAPI server header was already handled in redirect block above
+        #
+        # Do NOT use seajs alone, logincontroller alone, or doc/page/login.asp alone.
+
+        hik_strong = (
+            'hikvision' in r_low
+            or 'hikvision' in t_low
+            or '/isapi/' in r_low
+            or (
+                'doc/page/login.asp' in r_low
+                and ('seajs' in r_low or 'sea-config' in r_low or 'logincontroller' in r_low)
+            )
+        )
+        if hik_strong:
             cam_type = "HIKVISION"
             camera_found = True
         elif 'dahua' in r_low or 'dahua' in t_low or 'dh-' in t_low or 'dh-' in r_low:
@@ -1000,11 +1052,18 @@ def scan(ip, port):
                     safe_print(f"[✓] {camera_type} Found! at {url}", Fore.GREEN)
                     
             elif 'HTTP' in response and 'login.asp' in response:
-                if ip not in detected_ips:
-                    detected_ips.add(ip)
-                    camera_type = "HIK Vision Camera"
-                    camera_found = True
-                    safe_print(f"[✓] {camera_type} Found! at {url}", Fore.RED)
+                # Require a stronger Hikvision signal — login.asp alone is too generic.
+                # Accept only if the response also contains hikvision brand name OR /isapi/ path.
+                body_low = response.lower()
+                if 'hikvision' in body_low or '/isapi/' in body_low or (
+                    'doc/page/login.asp' in body_low
+                    and ('seajs' in body_low or 'sea-config' in body_low)
+                ):
+                    if ip not in detected_ips:
+                        detected_ips.add(ip)
+                        camera_type = "HIK Vision Camera"
+                        camera_found = True
+                        safe_print(f"[✓] {camera_type} Found! at {url}", Fore.RED)
             
             # Live save to file
             if camera_found:
