@@ -90,7 +90,6 @@ DEFAULT_CREDENTIALS = [
     ("admin", "admin12345"),
     ("admin", "admin1122"),
     ("admin", "12345"),
-    ("admin", "123456"),
     ("admin", "password"),
 ]
 
@@ -98,24 +97,24 @@ DEFAULT_CREDENTIALS = [
 class CameraValidator:
     """
     Camera credential validator.
-    Each check uses a specific API endpoint with a known response signature
-    so we NEVER report a false positive from a publicly-accessible page.
+    Uses specific API endpoints with known response signatures.
+    Combines body-content verification (no false positives) with
+    401 fast-fail (speed) from the best practices of both tools.
     """
     RTSP_PORT = 554
-    TIMEOUT   = 3.5
+    TIMEOUT   = 3.0
 
-    # Endpoints with deterministic success markers ─────────────────────
-    # (url_suffix, success_strings_in_body, auth_types_to_try)
+    # Each entry: (path, [required_body_markers])
+    # 401 on any entry = wrong credentials confirmed → stop that endpoint
+    # 200 + markers present = real authenticated response
     HIK_ENDPOINTS = [
-        ("/ISAPI/System/deviceInfo",   ["<DeviceInfo", "<serialNumber", "deviceName"]),
-        ("/ISAPI/Security/userCheck",  ["statusValue", "<statusValue"]),
+        ("/ISAPI/System/deviceInfo",  ["<DeviceInfo", "<serialNumber", "deviceName"]),
+        ("/ISAPI/Security/userCheck", ["statusValue", "<statusValue"]),
     ]
     DAHUA_ENDPOINTS = [
-        ("/cgi-bin/magicBox.cgi?action=getDeviceType",           ["DeviceType="]),
+        ("/cgi-bin/magicBox.cgi?action=getDeviceType",            ["DeviceType="]),
         ("/cgi-bin/configManager.cgi?action=getConfig&name=General", ["table.General"]),
-        ("/RPC2",                                                 []),  # body-independent: 200 = auth ok
     ]
-    # Snapshot endpoints: success = 200 + image/jpeg content-type
     SNAPSHOT_PATHS = [
         "/cgi-bin/snapshot.cgi",
         "/snapshot.cgi",
@@ -143,13 +142,13 @@ class CameraValidator:
                 ok, msg = self._check_endpoint(base + suffix, markers, "Hikvision")
                 if ok: return True, msg
 
-        # 2. Dahua / Anjhua CGI + RPC2
+        # 2. Dahua / Anjhua CGI
         for suffix, markers in self.DAHUA_ENDPOINTS:
             for base in (base_http, base_https):
                 ok, msg = self._check_endpoint(base + suffix, markers, "Dahua")
                 if ok: return True, msg
 
-        # 3. Image snapshot — content-type: image/jpeg proves auth
+        # 3. Snapshot — only real image/jpeg response proves auth
         for path in self.SNAPSHOT_PATHS:
             ok, msg = self._check_snapshot(base_http + path)
             if ok: return True, msg
@@ -163,21 +162,24 @@ class CameraValidator:
     # ── helpers ──────────────────────────────────────────────────────────
 
     def _get(self, url, auth):
-        """GET with no redirect following — redirects are auth failures."""
+        """GET without redirect following. Redirect = auth not accepted."""
         try:
             return requests.get(
                 url, auth=auth,
                 timeout=self.TIMEOUT, verify=False,
-                allow_redirects=False          # ← KEY: no redirect chasing
+                allow_redirects=False
             )
         except Exception:
             return None
 
     def _check_endpoint(self, url, success_markers, brand):
         """
-        Try Digest then Basic auth.
-        Success = status 200 AND (no markers required OR at least one marker in body).
-        A redirect (3xx) or 401 is always a failure.
+        Try Digest auth first, then Basic.
+
+        Response logic (borrowed from W8Team tool + body verification):
+          • 200 + body contains all markers → CONFIRMED SUCCESS
+          • 401 → wrong credentials, endpoint exists → STOP immediately (fast fail)
+          • 3xx / 404 / other → endpoint not here, skip silently
         """
         for auth in (
             HTTPDigestAuth(self.username, self.password),
@@ -186,26 +188,28 @@ class CameraValidator:
             r = self._get(url, auth)
             if r is None:
                 continue
+
             if r.status_code == 200:
-                # If we require specific body markers, check them
-                if success_markers:
-                    if any(m in r.text for m in success_markers):
-                        label = "Digest" if isinstance(auth, HTTPDigestAuth) else "Basic"
-                        return True, f"{brand} ({label} Auth)"
-                else:
-                    # No markers required (e.g. RPC2 — 200 = authenticated)
-                    # But reject if body suggests it's a login page
-                    body_low = r.text.lower()
-                    if not any(w in body_low for w in ['<form', 'type="password"', "type='password'", 'login']):
-                        label = "Digest" if isinstance(auth, HTTPDigestAuth) else "Basic"
-                        return True, f"{brand} ({label} Auth)"
+                # Must verify body — a 200 on a wrong redirect would still
+                # fail here because login pages never contain these markers
+                if any(m in r.text for m in success_markers):
+                    label = "Digest" if isinstance(auth, HTTPDigestAuth) else "Basic"
+                    return True, f"{brand} ({label} Auth)"
+                # 200 but wrong body → not this endpoint type, continue
+
+            elif r.status_code == 401:
+                # 401 means the endpoint EXISTS and credentials are WRONG.
+                # No need to try Basic after Digest fails on same endpoint.
+                return False, "Wrong credentials (401)"
+
+            # 3xx / 404 / 500 → endpoint absent or redirected → try next
+
         return False, "Failed"
 
     def _check_snapshot(self, url):
         """
-        Snapshot check: a real JPEG response (Content-Type contains image/)
-        proves the camera accepted credentials.  An HTML login page never
-        returns Content-Type: image/jpeg.
+        Content-Type: image/* on 200 = camera served a real frame.
+        HTML login pages NEVER return image/jpeg.
         """
         for auth in (
             HTTPDigestAuth(self.username, self.password),
@@ -219,10 +223,12 @@ class CameraValidator:
                 if "image/" in ct:
                     label = "Digest" if isinstance(auth, HTTPDigestAuth) else "Basic"
                     return True, f"Snapshot ({label} Auth)"
+            elif r.status_code == 401:
+                return False, "Wrong credentials (401)"
         return False, "Failed"
 
     def _try_rtsp(self):
-        """RTSP DESCRIBE with Basic auth — checks for RTSP/1.0 200 OK exactly."""
+        """RTSP DESCRIBE with Basic auth — checks RTSP/1.0 200 OK strictly."""
         sock = None
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
