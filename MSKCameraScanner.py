@@ -515,7 +515,7 @@ def extract_title(html_content):
 
 
 
-def get_camera_type(response_str, title, filter_mode=1):
+def get_camera_type(response_str, title, server="Unknown", filter_mode=1):
     """
     Fingerprint camera and filter based on user choice.
     filter_mode: 1 = Show All, 2 = Only Cameras
@@ -872,7 +872,7 @@ def super_fast_scan(gui_start_ip=None, gui_end_ip=None, gui_filter_mode=None):
                                     pass
 
                         if response_full:
-                            camera_type = get_camera_type(response_full, title, filter_mode)
+                            camera_type = get_camera_type(response_full, title, server, filter_mode)
                             if camera_type:
                                 with results_lock:
                                     results.append({
