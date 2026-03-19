@@ -85,42 +85,39 @@ def loading_spinner(duration=0.8, task="Initializing"):
 
 # Default credentials to try
 DEFAULT_CREDENTIALS = [
-    ("admin", "admin123"),
-    ("admin", "admin1234"),
-    ("admin", "admin12345"),
-    ("admin", "admin1122"),
-    ("admin", "12345"),
-    ("admin", "password"),
+    ("admin", "admin123"),    # tried 1st
+    ("admin", "admin1234"),   # tried 2nd
+    ("admin", "admin12345"),  # tried 3rd
+    ("admin", "admin1122"),   # tried 4th
+    ("admin", "12345"),       # tried 5th
+    ("admin", "123456"),      # tried 6th
+    ("admin", "password"),    # tried 7th (last)
 ]
 
 
 class CameraValidator:
     """
-    Camera credential validator.
-    Uses specific API endpoints with known response signatures.
-    Combines body-content verification (no false positives) with
-    401 fast-fail (speed) from the best practices of both tools.
+    Fast camera credential validator.
+    - 1.5s timeout (was 3.0s)
+    - No HTTPS fallback unless port==443
+    - Pre-detect brand before trying all credentials (avoids pointless requests)
+    - 401 fast-fail to stop immediately on wrong credentials
     """
     RTSP_PORT = 554
-    TIMEOUT   = 3.0
+    TIMEOUT   = 1.5   # tight timeout — cameras either respond fast or not at all
 
-    # Each entry: (path, [required_body_markers])
-    # 401 on any entry = wrong credentials confirmed → stop that endpoint
-    # 200 + markers present = real authenticated response
     HIK_ENDPOINTS = [
         ("/ISAPI/System/deviceInfo",  ["<DeviceInfo", "<serialNumber", "deviceName"]),
         ("/ISAPI/Security/userCheck", ["statusValue", "<statusValue"]),
     ]
     DAHUA_ENDPOINTS = [
-        ("/cgi-bin/magicBox.cgi?action=getDeviceType",            ["DeviceType="]),
+        ("/cgi-bin/magicBox.cgi?action=getDeviceType", ["DeviceType="]),
         ("/cgi-bin/configManager.cgi?action=getConfig&name=General", ["table.General"]),
     ]
+    # Only 2 snapshot paths — most generic IP cameras expose one of these
     SNAPSHOT_PATHS = [
         "/cgi-bin/snapshot.cgi",
-        "/snapshot.cgi",
         "/snap.jpg",
-        "/image/jpeg.cgi",
-        "/cgi-bin/hi3510/snap.cgi",
     ]
 
     def __init__(self, ip, username, password, port=80):
@@ -128,41 +125,80 @@ class CameraValidator:
         self.username = username
         self.password = password
         self.port     = port
+        # Only try HTTPS if the port is the standard HTTPS port
+        self._bases = [f"http://{ip}:{port}"]
+        if port == 443:
+            self._bases = [f"https://{ip}:{port}"]
 
     def validate(self, hint=None):
         if not HAS_REQUESTS:
             return False, "requests library not installed"
 
-        base_http  = f"http://{self.ip}:{self.port}"
-        base_https = f"https://{self.ip}:{self.port}"
+        # Pre-detect brand using an unauthenticated probe (no credentials wasted)
+        # Returns: "hikvision", "dahua", "generic", or None (unreachable)
+        brand = self._detect_brand()
 
-        # 1. Hikvision ISAPI
-        for suffix, markers in self.HIK_ENDPOINTS:
-            for base in (base_http, base_https):
-                ok, msg = self._check_endpoint(base + suffix, markers, "Hikvision")
-                if ok: return True, msg
+        if brand == "hikvision":
+            for suffix, markers in self.HIK_ENDPOINTS:
+                for base in self._bases:
+                    ok, msg = self._check_endpoint(base + suffix, markers, "Hikvision")
+                    if ok: return True, msg
+            return False, "No match"   # Don't bother with Dahua on Hikvision camera
 
-        # 2. Dahua / Anjhua CGI
-        for suffix, markers in self.DAHUA_ENDPOINTS:
-            for base in (base_http, base_https):
-                ok, msg = self._check_endpoint(base + suffix, markers, "Dahua")
-                if ok: return True, msg
-
-        # 3. Snapshot — only real image/jpeg response proves auth
-        for path in self.SNAPSHOT_PATHS:
-            ok, msg = self._check_snapshot(base_http + path)
+        elif brand == "dahua":
+            for suffix, markers in self.DAHUA_ENDPOINTS:
+                for base in self._bases:
+                    ok, msg = self._check_endpoint(base + suffix, markers, "Dahua")
+                    if ok: return True, msg
+            # RTSP fallback for Dahua
+            ok, msg = self._try_rtsp()
             if ok: return True, msg
+            return False, "No match"
 
-        # 4. RTSP
-        ok, msg = self._try_rtsp()
-        if ok: return True, msg
+        elif brand == "generic":
+            # Try both brands (unknown type) + snapshot
+            for suffix, markers in self.HIK_ENDPOINTS:
+                ok, msg = self._check_endpoint(self._bases[0] + suffix, markers, "Hikvision")
+                if ok: return True, msg
+            for suffix, markers in self.DAHUA_ENDPOINTS:
+                ok, msg = self._check_endpoint(self._bases[0] + suffix, markers, "Dahua")
+                if ok: return True, msg
+            for path in self.SNAPSHOT_PATHS:
+                ok, msg = self._check_snapshot(self._bases[0] + path)
+                if ok: return True, msg
+            ok, msg = self._try_rtsp()
+            if ok: return True, msg
+            return False, "No match"
 
-        return False, "No match"
+        else:
+            # brand is None = camera didn't respond at all — skip immediately
+            return False, "Camera unreachable"
 
     # ── helpers ──────────────────────────────────────────────────────────
 
+    def _detect_brand(self):
+        """
+        Quick unauthenticated GET to identify camera brand.
+        Returns: 'hikvision', 'dahua', 'generic', or None (unreachable).
+        This avoids wasting 7 credential attempts on the wrong API.
+        """
+        try:
+            r = requests.get(
+                self._bases[0] + "/",
+                timeout=self.TIMEOUT, verify=False,
+                allow_redirects=True
+            )
+            body = r.text.lower()
+            if "hikvision" in body or "/isapi/" in body or "login.asp" in body:
+                return "hikvision"
+            if "dahua" in body or "anjhua" in body or "web service" in body or "devtype=" in body:
+                return "dahua"
+            return "generic"
+        except Exception:
+            return None   # Unreachable — skip entirely
+
     def _get(self, url, auth):
-        """GET without redirect following. Redirect = auth not accepted."""
+        """GET without redirect. Redirect = auth not accepted."""
         try:
             return requests.get(
                 url, auth=auth,
@@ -174,12 +210,10 @@ class CameraValidator:
 
     def _check_endpoint(self, url, success_markers, brand):
         """
-        Try Digest auth first, then Basic.
-
-        Response logic (borrowed from W8Team tool + body verification):
-          • 200 + body contains all markers → CONFIRMED SUCCESS
-          • 401 → wrong credentials, endpoint exists → STOP immediately (fast fail)
-          • 3xx / 404 / other → endpoint not here, skip silently
+        Try Digest then Basic auth on a specific API endpoint.
+          200 + body markers  → SUCCESS
+          401                 → wrong password, STOP (fast fail)
+          3xx / 404 / timeout → endpoint absent, skip
         """
         for auth in (
             HTTPDigestAuth(self.username, self.password),
@@ -187,40 +221,32 @@ class CameraValidator:
         ):
             r = self._get(url, auth)
             if r is None:
-                continue
+                break   # Connection failed — don't try Basic if Digest already timed out
 
             if r.status_code == 200:
-                # Must verify body — a 200 on a wrong redirect would still
-                # fail here because login pages never contain these markers
                 if any(m in r.text for m in success_markers):
                     label = "Digest" if isinstance(auth, HTTPDigestAuth) else "Basic"
                     return True, f"{brand} ({label} Auth)"
-                # 200 but wrong body → not this endpoint type, continue
 
             elif r.status_code == 401:
-                # 401 means the endpoint EXISTS and credentials are WRONG.
-                # No need to try Basic after Digest fails on same endpoint.
+                # Endpoint exists, credentials definitely wrong — stop immediately
                 return False, "Wrong credentials (401)"
 
-            # 3xx / 404 / 500 → endpoint absent or redirected → try next
+            # 3xx / 404 / 403 → endpoint not here
 
         return False, "Failed"
 
     def _check_snapshot(self, url):
-        """
-        Content-Type: image/* on 200 = camera served a real frame.
-        HTML login pages NEVER return image/jpeg.
-        """
+        """image/jpeg Content-Type on 200 = real authenticated snapshot."""
         for auth in (
             HTTPDigestAuth(self.username, self.password),
             (self.username, self.password),
         ):
             r = self._get(url, auth)
             if r is None:
-                continue
+                break
             if r.status_code == 200:
-                ct = r.headers.get("Content-Type", "").lower()
-                if "image/" in ct:
+                if "image/" in r.headers.get("Content-Type", "").lower():
                     label = "Digest" if isinstance(auth, HTTPDigestAuth) else "Basic"
                     return True, f"Snapshot ({label} Auth)"
             elif r.status_code == 401:
@@ -228,18 +254,16 @@ class CameraValidator:
         return False, "Failed"
 
     def _try_rtsp(self):
-        """RTSP DESCRIBE with Basic auth — checks RTSP/1.0 200 OK strictly."""
+        """RTSP DESCRIBE with Basic auth — RTSP/1.0 200 OK strictly."""
         sock = None
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(self.TIMEOUT)
             sock.connect((self.ip, self.RTSP_PORT))
-
             rtsp_url = f"rtsp://{self.ip}:{self.RTSP_PORT}/cam/realmonitor?channel=1&subtype=0"
             auth_str = base64.b64encode(
                 f"{self.username}:{self.password}".encode()
             ).decode()
-
             request = (
                 f"DESCRIBE {rtsp_url} RTSP/1.0\r\n"
                 f"CSeq: 1\r\n"
@@ -248,7 +272,6 @@ class CameraValidator:
             )
             sock.send(request.encode())
             response = sock.recv(4096).decode(errors="ignore")
-
             if "RTSP/1.0 200 OK" in response:
                 return True, "RTSP (Basic Auth)"
         except Exception:
