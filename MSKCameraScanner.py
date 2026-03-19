@@ -143,9 +143,11 @@ class CameraValidator:
                 for base in self._bases:
                     ok, msg = self._check_endpoint(base + suffix, markers, "Hikvision")
                     if ok: return True, msg
-            return False, "No match"   # Don't bother with Dahua on Hikvision camera
+            # If HIK-specific check fails, the brand detection might have been a false positive.
+            # Fallback to generic checks to ensure we don't miss anything.
+            brand = "generic"
 
-        elif brand == "dahua":
+        if brand == "dahua":
             for suffix, markers in self.DAHUA_ENDPOINTS:
                 for base in self._bases:
                     ok, msg = self._check_endpoint(base + suffix, markers, "Dahua")
@@ -153,9 +155,10 @@ class CameraValidator:
             # RTSP fallback for Dahua
             ok, msg = self._try_rtsp()
             if ok: return True, msg
-            return False, "No match"
+            # Fallback to generic
+            brand = "generic"
 
-        elif brand == "generic":
+        if brand == "generic":
             # Try both brands (unknown type) + snapshot
             for suffix, markers in self.HIK_ENDPOINTS:
                 ok, msg = self._check_endpoint(self._bases[0] + suffix, markers, "Hikvision")
@@ -189,10 +192,24 @@ class CameraValidator:
                 allow_redirects=True
             )
             body = r.text.lower()
-            if "hikvision" in body or "/isapi/" in body or "login.asp" in body:
+            headers = {k.lower(): v.lower() for k, v in r.headers.items()}
+            server = headers.get("server", "")
+            
+            # Refined HIK detection: look for HIK specific markers in body or headers
+            # Note: login.asp is too generic, so we combine it with other hints
+            if "hikvision" in body or "/isapi/" in body:
                 return "hikvision"
+            if "app-cgi" in server or "hikvision" in server:
+                return "hikvision"
+            if "login.asp" in body and ("net-video" in body or "doc.write" in body):
+                return "hikvision"
+
+            # Dahua detection
             if "dahua" in body or "anjhua" in body or "web service" in body or "devtype=" in body:
                 return "dahua"
+            if "dahua" in server:
+                return "dahua"
+            
             return "generic"
         except Exception:
             return None   # Unreachable — skip entirely
@@ -476,7 +493,12 @@ def get_camera_type(response_str, title, filter_mode=1):
     # Major Brands
     if not camera_found:
         if 'hikvision' in r_low or 'hikvision' in t_low or '/isapi/' in r_low:
-            cam_type = "HIKVISION"
+            # Check for generic login pages that aren't necessarily Hikvision
+            if 'hikvision' not in r_low and 'hikvision' not in t_low and 'login.asp' in r_low:
+                # If only login.asp is present without "hikvision", it's likely a generic camera
+                cam_type = "IP CAMERA"
+            else:
+                cam_type = "HIKVISION"
             camera_found = True
         elif 'dahua' in r_low or 'dahua' in t_low or 'dh-' in t_low or 'dh-' in r_low:
             cam_type = "DAHUA"
