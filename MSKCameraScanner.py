@@ -132,8 +132,9 @@ class CameraValidator:
         """Try both Digest and Basic auth on a URL"""
         # Try Digest first
         try:
+            # allow_redirects=True to handle cases where ISAPI/CGI is at a redirected path
             resp = requests.get(url, auth=HTTPDigestAuth(self.username, self.password), 
-                               timeout=self.timeout, verify=False, allow_redirects=False)
+                               timeout=self.timeout, verify=False, allow_redirects=True)
             if resp.status_code == 200:
                 return True, f"{label} (Digest Auth)"
         except:
@@ -142,7 +143,7 @@ class CameraValidator:
         # Try Basic if Digest didn't work (or skipped)
         try:
             resp = requests.get(url, auth=(self.username, self.password), 
-                               timeout=self.timeout, verify=False, allow_redirects=False)
+                               timeout=self.timeout, verify=False, allow_redirects=True)
             if resp.status_code == 200:
                 return True, f"{label} (Basic Auth)"
         except:
@@ -362,6 +363,14 @@ def get_camera_type(response_str, title, filter_mode=1):
     elif t_low == 'cplus' or 'cplus' in r_low or t_low == 'c+':
         cam_type = "CPlus"
         camera_found = True
+    elif '301 moved' in r_low or '302 found' in r_low or 'object moved' in r_low:
+        # If it's a redirect, check if the redirect page itself has hints
+        if 'dahua' in r_low or 'dh-' in r_low:
+             cam_type = "DAHUA (Redirect)"
+             camera_found = True
+        elif 'hikvision' in r_low or 'isapi' in r_low:
+             cam_type = "HIKVISION (Redirect)"
+             camera_found = True
     
     # Major Brands
     if not camera_found:
@@ -371,13 +380,13 @@ def get_camera_type(response_str, title, filter_mode=1):
         elif 'dahua' in r_low or 'dahua' in t_low or 'dh-' in t_low or 'dh-' in r_low:
             cam_type = "DAHUA"
             camera_found = True
-        elif 'axis' in t_low or 'axis network' in t_low:
+        elif 'axis' in t_low or 'axis network' in t_low or 'axis.com' in r_low:
             cam_type = "AXIS"
             camera_found = True
-        elif 'sony' in t_low and 'camera' in t_low:
+        elif ('sony' in t_low or 'sony' in r_low) and 'camera' in t_low:
             cam_type = "SONY"
             camera_found = True
-        elif 'bosch' in t_low and 'camera' in t_low:
+        elif ('bosch' in t_low or 'bosch' in r_low) and 'camera' in t_low:
             cam_type = "BOSCH"
             camera_found = True
             
@@ -386,7 +395,7 @@ def get_camera_type(response_str, title, filter_mode=1):
         if any(x in t_low for x in ['ip camera', 'ip cam', 'network camera', 'ipcam', 'dvr', 'nvr']):
             cam_type = "IP CAMERA"
             camera_found = True
-        elif 'h.264' in t_low or 'monitoring system' in t_low or 'view.html' in r_low:
+        elif 'h.264' in t_low or 'monitoring system' in t_low or 'view.html' in r_low or 'net.html' in r_low:
             cam_type = "GENERIC CAMERA"
             camera_found = True
             
@@ -594,61 +603,72 @@ def super_fast_scan(gui_start_ip=None, gui_end_ip=None, gui_filter_mode=None):
     
     # Worker function for threading
     def worker():
+        # Session for connection pooling
+        session = requests.Session()
+        session.verify = False
+        adapter = requests.adapters.HTTPAdapter(pool_connections=max_threads, pool_maxsize=max_threads)
+        session.mount('http://', adapter)
+        session.mount('https://', adapter)
+
         while True:
             try:
                 ip, port = scan_queue.get(timeout=0.5)
                 
                 try:
-                    # Ultra-fast port check
+                    # 1. Quick port check first to avoid requests overhead on closed ports
                     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                    sock.settimeout(0.5)
+                    sock.settimeout(0.4) # Slightly faster timeout
                     result = sock.connect_ex((ip, port))
                     sock.close()
                     
                     if result == 0:
-                        # Port is open, get HTTP data
-                        response = b''
+                        # 2. Port is open, use requests for robust HTTP/HTTPS/Redirect handling
+                        url = f"http://{ip}:{port}"
                         try:
-                            http_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                            http_sock.settimeout(1.2)
-                            http_sock.connect((ip, port))
+                            # Allow redirects but limit them
+                            resp = session.get(url, timeout=2.5, allow_redirects=True, stream=True)
                             
-                            request = f'GET / HTTP/1.1\r\nHost: {ip}\r\nConnection: close\r\n\r\n'
-                            http_sock.send(request.encode())
+                            # Read a small portion of the response body for fingerprinting
+                            # Using stream=True and iter_content to avoid loading massive files
+                            content_chunks = []
+                            content_len = 0
+                            for chunk in resp.iter_content(chunk_size=4096):
+                                content_chunks.append(chunk)
+                                content_len += len(chunk)
+                                if content_len > 32768: break # 32KB limit
                             
-                            http_sock.settimeout(2.0)
-                            while True:
-                                data = http_sock.recv(4096)
-                                if not data: break
-                                response += data
-                                if len(response) > 30000: break
-                            http_sock.close()
-                        except:
-                            if 'http_sock' in locals(): http_sock.close()
-                        
-                        if response:
-                            response_str = response.decode('utf-8', errors='ignore')
-                            title = extract_title(response_str)
+                            response_body = b"".join(content_chunks).decode('utf-8', errors='ignore')
                             
-                            server_match = re.search(r'Server: ([^\r\n]+)', response_str, re.IGNORECASE)
-                            server = server_match.group(1) if server_match else "Unknown"
+                            # Combine headers and body for fingerprinting
+                            response_full = f"HTTP/1.1 {resp.status_code}\n"
+                            for k, v in resp.headers.items():
+                                response_full += f"{k}: {v}\n"
+                            response_full += "\n" + response_body
                             
-                            url = f"http://{ip}:{port}" if port != 80 else f"http://{ip}"
-                            camera_type = get_camera_type(response_str, title, filter_mode if 'filter_mode' in locals() else 1)
+                            title = extract_title(response_body)
+                            server = resp.headers.get('Server', 'Unknown')
+                            
+                            camera_type = get_camera_type(response_full, title, filter_mode if 'filter_mode' in locals() else 1)
                             
                             if camera_type:
                                 with results_lock:
+                                    # Use the final URL after redirects
+                                    final_url = resp.url
                                     results.append({
                                         'ip': ip, 'port': port, 'title': title,
-                                        'server': server, 'url': url, 'type': camera_type
+                                        'server': server, 'url': final_url, 'type': camera_type
                                     })
-                                    safe_print(f"[✓] Camera Found: {ip}:{port} - {title[:40]}", Fore.GREEN)
+                                    safe_print(f"[✓] Camera Found: {ip}:{port} - {camera_type} ({title[:30]})", Fore.GREEN)
+                        except requests.exceptions.SSLError:
+                            # Try HTTPS explicitly if SSL error occurs on HTTP port (rare but possible)
+                            pass 
+                        except:
+                            pass
                 except:
                     pass
                 
                 scan_queue.task_done()
             except:
-                # Queue empty or timeout
                 break
     
     # Start threads
@@ -713,7 +733,9 @@ def super_fast_scan(gui_start_ip=None, gui_end_ip=None, gui_filter_mode=None):
 
 
 def brute_force_cameras(camera_list, output_widget=None):
-    """Try default credentials on a list of cameras"""
+    """Try default credentials on a list of cameras in parallel"""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
     def log(msg, color=Fore.GREEN):
         if output_widget:
             output_widget.insert('end', msg + "\n")
@@ -725,10 +747,13 @@ def brute_force_cameras(camera_list, output_widget=None):
         log("[-] No cameras to test.", Fore.YELLOW)
         return
 
-    log(f"\n[*] Starting default credential test on {len(camera_list)} cameras...", Fore.YELLOW)
+    log(f"\n[*] Starting multi-threaded default credential test on {len(camera_list)} cameras...", Fore.YELLOW)
     
     success_count = 0
-    for cam in camera_list:
+    results_lock = threading.Lock()
+
+    def test_single_camera(cam):
+        nonlocal success_count
         ip = cam['ip']
         port = cam['port']
         cam_type = cam['type']
@@ -737,18 +762,28 @@ def brute_force_cameras(camera_list, output_widget=None):
         
         found_login = False
         for user, pwd in DEFAULT_CREDENTIALS:
-            # Use the universal validator with the detected type as a hint
-            validator = CameraValidator(ip, user, pwd, port)
-            success, msg = validator.validate(hint=cam_type)
-            
-            if success:
-                log(f"    [+] SUCCESS: {ip}:{port} | {user}:{pwd} ({msg})", Fore.GREEN)
-                success_count += 1
-                found_login = True
-                break
+            try:
+                validator = CameraValidator(ip, user, pwd, port)
+                success, msg = validator.validate(hint=cam_type)
+                
+                if success:
+                    log(f"    [+] SUCCESS: {ip}:{port} | {user}:{pwd} ({msg})", Fore.GREEN)
+                    with results_lock:
+                        success_count += 1
+                    found_login = True
+                    break
+            except Exception as e:
+                pass
         
         if not found_login:
             log(f"    [-] No match for {ip}:{port}", Fore.RED)
+
+    # Use ThreadPoolExecutor for parallel testing
+    max_workers = min(10, len(camera_list)) # Don't overwhelm with too many threads
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = [executor.submit(test_single_camera, cam) for cam in camera_list]
+        for future in as_completed(futures):
+            pass # Wait for all to finish
             
     log(f"\n[✓] Credential test complete. Found {success_count} matches.", Fore.GREEN)
     if not output_widget:
