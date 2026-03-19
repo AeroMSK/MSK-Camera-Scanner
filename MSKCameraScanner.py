@@ -218,15 +218,6 @@ class CameraValidator:
         Quick unauthenticated GET to identify camera brand.
         Returns: 'hikvision', 'dahua', 'generic', or None (unreachable).
         This avoids wasting credential attempts on the wrong API.
-
-        Handles:
-          - Classic Hikvision (hikvision in body, /isapi/ paths)
-          - Server header fingerprint (App-CGI, Hikvision)
-          - NEW: iVMS-style Hikvision with JS redirect to /doc/page/login.asp
-            These cameras return a nearly-empty root page with:
-              window.location.href = "/doc/page/login.asp?_" + (new Date()).getTime();
-            We detect them by checking for 'doc/page/login.asp' in the body,
-            or probing that path directly for SeaJS/AngularJS loginController markers.
         """
         base = self._bases[0]
         try:
@@ -239,23 +230,19 @@ class CameraValidator:
             headers = {k.lower(): v.lower() for k, v in r.headers.items()}
             server = headers.get("server", "")
 
-            # --- Hikvision checks ---
-            # 1. Explicit brand name or ISAPI path
+            # --- Hikvision Fingerprints ---
             if "hikvision" in body or "/isapi/" in body:
                 return "hikvision"
-            # 2. Server header fingerprint
-            if "app-cgi" in server or "hikvision" in server:
+            if any(h in server for h in ["dnvrs-webs", "app-cgi", "app-hds", "hikvision"]):
                 return "hikvision"
-            # 3. iVMS-style JS redirect to /doc/page/login.asp
-            #    Root body: window.location.href = "/doc/page/login.asp?_" + ...
+            if "hikvision digital technology" in body:
+                return "hikvision"
             if "doc/page/login.asp" in body:
-                return "hikvision"
-            # 4. Old Hikvision: login.asp with net-video or doc.write pattern
-            if "login.asp" in body and ("net-video" in body or "doc.write" in body):
-                return "hikvision"
-
-            # 5. If root page is nearly empty, probe /doc/page/login.asp directly
-            #    (JS-redirect cameras have tiny root bodies)
+                if len(body.strip()) < 1000:
+                    return "hikvision"
+                if any(m in body for m in ["seajs", "sea-config", "logincontroller"]):
+                    return "hikvision"
+            
             if len(body.strip()) < 600:
                 try:
                     r2 = requests.get(
@@ -265,16 +252,13 @@ class CameraValidator:
                     )
                     if r2.status_code == 200:
                         b2 = r2.text.lower()
-                        # SeaJS + AngularJS loginController = Hikvision iVMS fingerprint
-                        if "seajs" in b2 or "logincontroller" in b2 or "sea-config.js" in b2:
+                        if any(m in b2 for m in ["seajs", "logincontroller", "sea-config.js", "hikvision", "/isapi/"]):
                             return "hikvision"
-                        if "hikvision" in b2 or "/isapi/" in b2:
-                            return "hikvision"
-                except Exception:
+                except:
                     pass
 
             # --- Dahua checks ---
-            if "dahua" in body or "anjhua" in body or "web service" in body or "devtype=" in body:
+            if any(x in body for x in ["dahua", "anjhua", "web service", "devtype="]):
                 return "dahua"
             if "dahua" in server:
                 return "dahua"
@@ -561,27 +545,29 @@ def get_camera_type(response_str, title, filter_mode=1):
     
     # Major Brands
     if not camera_found:
-        # --- Hikvision detection (strict multi-signal fingerprinting) ---
+        # --- Hikvision detection (Perfected Fingerprinting) ---
         #
-        # We intentionally require STRONG signals to avoid false positives.
-        # Rules, in priority order:
-        #   A) Explicit brand name anywhere in body/title
-        #   B) /isapi/ path in body (Hikvision-specific API namespace)
-        #   C) iVMS-4200 JS-redirect fingerprint:
-        #       MUST have 'doc/page/login.asp' in body AND at least one of:
-        #       'seajs' OR 'sea-config' OR 'logincontroller' in the SAME body.
-        #       (SeaJS alone and logincontroller alone are too generic to trust.)
-        #   D) ISAPI server header was already handled in redirect block above
-        #
-        # Do NOT use seajs alone, logincontroller alone, or doc/page/login.asp alone.
-
+        # Rules prioritize accuracy and coverage:
+        #   A) Explicit brand or copyright marker
+        #   B) Specific Server headers (DNVRS-Webs, App-CGI, etc.)
+        #   C) /isapi/ infrastructure path
+        #   D) iVMS-4200 JS-redirect combo or small-body hint
+        
+        server_low = server.lower()
         hik_strong = (
-            'hikvision' in r_low
-            or 'hikvision' in t_low
+            'hikvision' in r_low 
+            or 'hikvision' in t_low 
             or '/isapi/' in r_low
+            or 'hikvision digital technology' in r_low
+            or any(h in server_low for h in ['dnvrs-webs', 'app-cgi', 'app-hds', 'hikvision'])
             or (
-                'doc/page/login.asp' in r_low
-                and ('seajs' in r_low or 'sea-config' in r_low or 'logincontroller' in r_low)
+                'doc/page/login.asp' in r_low 
+                and (
+                    'seajs' in r_low 
+                    or 'sea-config' in r_low 
+                    or 'logincontroller' in r_low
+                    or len(response_str) < 1500 # Redirect pages are usually very small
+                )
             )
         )
         if hik_strong:
@@ -1052,13 +1038,17 @@ def scan(ip, port):
                     safe_print(f"[✓] {camera_type} Found! at {url}", Fore.GREEN)
                     
             elif 'HTTP' in response and 'login.asp' in response:
-                # Require a stronger Hikvision signal — login.asp alone is too generic.
-                # Accept only if the response also contains hikvision brand name OR /isapi/ path.
+                # Refined legacy detection
                 body_low = response.lower()
-                if 'hikvision' in body_low or '/isapi/' in body_low or (
-                    'doc/page/login.asp' in body_low
-                    and ('seajs' in body_low or 'sea-config' in body_low)
-                ):
+                is_hik = (
+                    'hikvision' in body_low or '/isapi/' in body_low 
+                    or any(h in body_low for h in ['dnvrs-webs', 'app-cgi', 'app-hds'])
+                    or (
+                        'doc/page/login.asp' in body_low
+                        and ('seajs' in body_low or 'sea-config' in body_low or len(body_low) < 1200)
+                    )
+                )
+                if is_hik:
                     if ip not in detected_ips:
                         detected_ips.add(ip)
                         camera_type = "HIK Vision Camera"
