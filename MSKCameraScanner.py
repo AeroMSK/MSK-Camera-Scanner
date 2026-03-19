@@ -183,33 +183,68 @@ class CameraValidator:
         """
         Quick unauthenticated GET to identify camera brand.
         Returns: 'hikvision', 'dahua', 'generic', or None (unreachable).
-        This avoids wasting 7 credential attempts on the wrong API.
+        This avoids wasting credential attempts on the wrong API.
+
+        Handles:
+          - Classic Hikvision (hikvision in body, /isapi/ paths)
+          - Server header fingerprint (App-CGI, Hikvision)
+          - NEW: iVMS-style Hikvision with JS redirect to /doc/page/login.asp
+            These cameras return a nearly-empty root page with:
+              window.location.href = "/doc/page/login.asp?_" + (new Date()).getTime();
+            We detect them by checking for 'doc/page/login.asp' in the body,
+            or probing that path directly for SeaJS/AngularJS loginController markers.
         """
+        base = self._bases[0]
         try:
             r = requests.get(
-                self._bases[0] + "/",
+                base + "/",
                 timeout=self.TIMEOUT, verify=False,
                 allow_redirects=True
             )
             body = r.text.lower()
             headers = {k.lower(): v.lower() for k, v in r.headers.items()}
             server = headers.get("server", "")
-            
-            # Refined HIK detection: look for HIK specific markers in body or headers
-            # Note: login.asp is too generic, so we combine it with other hints
+
+            # --- Hikvision checks ---
+            # 1. Explicit brand name or ISAPI path
             if "hikvision" in body or "/isapi/" in body:
                 return "hikvision"
+            # 2. Server header fingerprint
             if "app-cgi" in server or "hikvision" in server:
                 return "hikvision"
+            # 3. iVMS-style JS redirect to /doc/page/login.asp
+            #    Root body: window.location.href = "/doc/page/login.asp?_" + ...
+            if "doc/page/login.asp" in body:
+                return "hikvision"
+            # 4. Old Hikvision: login.asp with net-video or doc.write pattern
             if "login.asp" in body and ("net-video" in body or "doc.write" in body):
                 return "hikvision"
 
-            # Dahua detection
+            # 5. If root page is nearly empty, probe /doc/page/login.asp directly
+            #    (JS-redirect cameras have tiny root bodies)
+            if len(body.strip()) < 600:
+                try:
+                    r2 = requests.get(
+                        base + "/doc/page/login.asp",
+                        timeout=self.TIMEOUT, verify=False,
+                        allow_redirects=False
+                    )
+                    if r2.status_code == 200:
+                        b2 = r2.text.lower()
+                        # SeaJS + AngularJS loginController = Hikvision iVMS fingerprint
+                        if "seajs" in b2 or "logincontroller" in b2 or "sea-config.js" in b2:
+                            return "hikvision"
+                        if "hikvision" in b2 or "/isapi/" in b2:
+                            return "hikvision"
+                except Exception:
+                    pass
+
+            # --- Dahua checks ---
             if "dahua" in body or "anjhua" in body or "web service" in body or "devtype=" in body:
                 return "dahua"
             if "dahua" in server:
                 return "dahua"
-            
+
             return "generic"
         except Exception:
             return None   # Unreachable — skip entirely
@@ -492,13 +527,13 @@ def get_camera_type(response_str, title, filter_mode=1):
     
     # Major Brands
     if not camera_found:
-        if 'hikvision' in r_low or 'hikvision' in t_low or '/isapi/' in r_low:
-            # Check for generic login pages that aren't necessarily Hikvision
-            if 'hikvision' not in r_low and 'hikvision' not in t_low and 'login.asp' in r_low:
-                # If only login.asp is present without "hikvision", it's likely a generic camera
-                cam_type = "IP CAMERA"
-            else:
-                cam_type = "HIKVISION"
+        # iVMS-style Hikvision: SeaJS + AngularJS loginController fingerprint
+        # These cameras redirect to /doc/page/login.asp with SeaJS module loader
+        if 'doc/page/login.asp' in r_low or 'seajs' in r_low or ('logincontroller' in r_low and 'sea-config' in r_low):
+            cam_type = "HIKVISION"
+            camera_found = True
+        elif 'hikvision' in r_low or 'hikvision' in t_low or '/isapi/' in r_low:
+            cam_type = "HIKVISION"
             camera_found = True
         elif 'dahua' in r_low or 'dahua' in t_low or 'dh-' in t_low or 'dh-' in r_low:
             cam_type = "DAHUA"
