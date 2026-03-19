@@ -586,9 +586,9 @@ def super_fast_scan(gui_start_ip=None, gui_end_ip=None, gui_filter_mode=None):
     
     print(f"\n{Fore.GREEN}[✓] Total IPs to scan: {total_count}{Style.RESET_ALL}")
     
-    # Auto-detect optimal thread count
+    # Auto-detect optimal thread count — cap lower for Termux/mobile compatibility
     cpu_count = multiprocessing.cpu_count()
-    max_threads = min(500, cpu_count * 50)  # Scale with CPU cores
+    max_threads = min(300, cpu_count * 30)  # Balanced for desktop and mobile
     
     loading_spinner(0.8, "Deploying Threads")
     
@@ -603,73 +603,94 @@ def super_fast_scan(gui_start_ip=None, gui_end_ip=None, gui_filter_mode=None):
     
     # Worker function for threading
     def worker():
-        # Session for connection pooling
-        session = requests.Session()
-        session.verify = False
-        adapter = requests.adapters.HTTPAdapter(pool_connections=max_threads, pool_maxsize=max_threads)
-        session.mount('http://', adapter)
-        session.mount('https://', adapter)
+        # Session for connection pooling (only if requests is installed)
+        session = None
+        if HAS_REQUESTS:
+            session = requests.Session()
+            session.verify = False
+            adapter = requests.adapters.HTTPAdapter(pool_connections=max_threads, pool_maxsize=max_threads)
+            session.mount('http://', adapter)
+            session.mount('https://', adapter)
 
         while True:
             try:
                 ip, port = scan_queue.get(timeout=0.5)
                 
                 try:
-                    # 1. Quick port check first to avoid requests overhead on closed ports
+                    # 1. Quick port check first to avoid overhead on closed ports
                     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                    sock.settimeout(0.4) # Slightly faster timeout
+                    sock.settimeout(0.4)
                     result = sock.connect_ex((ip, port))
                     sock.close()
                     
                     if result == 0:
-                        # 2. Port is open, use requests for robust HTTP/HTTPS/Redirect handling
                         url = f"http://{ip}:{port}"
-                        try:
-                            # Allow redirects but limit them
-                            resp = session.get(url, timeout=2.5, allow_redirects=True, stream=True)
-                            
-                            # Read a small portion of the response body for fingerprinting
-                            # Using stream=True and iter_content to avoid loading massive files
-                            content_chunks = []
-                            content_len = 0
-                            for chunk in resp.iter_content(chunk_size=4096):
-                                content_chunks.append(chunk)
-                                content_len += len(chunk)
-                                if content_len > 32768: break # 32KB limit
-                            
-                            response_body = b"".join(content_chunks).decode('utf-8', errors='ignore')
-                            
-                            # Combine headers and body for fingerprinting
-                            response_full = f"HTTP/1.1 {resp.status_code}\n"
-                            for k, v in resp.headers.items():
-                                response_full += f"{k}: {v}\n"
-                            response_full += "\n" + response_body
-                            
-                            title = extract_title(response_body)
-                            server = resp.headers.get('Server', 'Unknown')
-                            
-                            camera_type = get_camera_type(response_full, title, filter_mode if 'filter_mode' in locals() else 1)
-                            
+                        response_full = ""
+                        title = "No Title Found"
+                        server = "Unknown"
+                        final_url = url
+
+                        if HAS_REQUESTS and session:
+                            # 2a. Use requests for robust HTTP/HTTPS/Redirect handling
+                            try:
+                                resp = session.get(url, timeout=2.5, allow_redirects=True, stream=True)
+                                content_chunks = []
+                                content_len = 0
+                                for chunk in resp.iter_content(chunk_size=4096):
+                                    content_chunks.append(chunk)
+                                    content_len += len(chunk)
+                                    if content_len > 32768: break
+                                response_body = b"".join(content_chunks).decode('utf-8', errors='ignore')
+                                response_full = f"HTTP/1.1 {resp.status_code}\n"
+                                for k, v in resp.headers.items():
+                                    response_full += f"{k}: {v}\n"
+                                response_full += "\n" + response_body
+                                title = extract_title(response_body)
+                                server = resp.headers.get('Server', 'Unknown')
+                                final_url = resp.url
+                            except Exception:
+                                pass
+                        else:
+                            # 2b. Fallback: raw socket HTTP (no redirect following)
+                            try:
+                                http_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                                http_sock.settimeout(2.0)
+                                http_sock.connect((ip, port))
+                                request = f'GET / HTTP/1.1\r\nHost: {ip}\r\nConnection: close\r\n\r\n'
+                                http_sock.send(request.encode())
+                                raw = b''
+                                while True:
+                                    data = http_sock.recv(4096)
+                                    if not data: break
+                                    raw += data
+                                    if len(raw) > 32768: break
+                                http_sock.close()
+                                response_full = raw.decode('utf-8', errors='ignore')
+                                title = extract_title(response_full)
+                                server_match = re.search(r'Server: ([^\r\n]+)', response_full, re.IGNORECASE)
+                                server = server_match.group(1) if server_match else "Unknown"
+                            except Exception:
+                                try:
+                                    http_sock.close()
+                                except Exception:
+                                    pass
+
+                        if response_full:
+                            camera_type = get_camera_type(response_full, title, filter_mode)
                             if camera_type:
                                 with results_lock:
-                                    # Use the final URL after redirects
-                                    final_url = resp.url
                                     results.append({
                                         'ip': ip, 'port': port, 'title': title,
                                         'server': server, 'url': final_url, 'type': camera_type
                                     })
                                     safe_print(f"[✓] Camera Found: {ip}:{port} - {camera_type} ({title[:30]})", Fore.GREEN)
-                        except requests.exceptions.SSLError:
-                            # Try HTTPS explicitly if SSL error occurs on HTTP port (rare but possible)
-                            pass 
-                        except:
-                            pass
-                except:
+                except Exception:
                     pass
                 
                 scan_queue.task_done()
             except:
                 break
+
     
     # Start threads
     threads = []
@@ -694,10 +715,8 @@ def super_fast_scan(gui_start_ip=None, gui_end_ip=None, gui_filter_mode=None):
     print(f"{Fore.CYAN}{'═'*50}{Style.RESET_ALL}\n")
     
     if results:
-        # Post-scan credential check for CLI
-        # Post-scan credential check for CLI
         if gui_start_ip is None:
-            # All identified camera brands and generic types are compatible
+            # Post-scan: offer credential testing on found cameras
             brute_forcible = [r for r in results if r['type'] not in ["Camera - Login"]]
             if brute_forcible:
                 print(f"{Fore.YELLOW}[!] Found {len(brute_forcible)} cameras compatible with default credential testing.{Style.RESET_ALL}")
