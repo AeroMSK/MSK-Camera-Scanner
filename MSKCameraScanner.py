@@ -96,84 +96,88 @@ DEFAULT_CREDENTIALS = [
 
 
 class CameraValidator:
-    """Universal camera validator - eliminates false positives with body content checks"""
-    HIK_PATH  = "/ISAPI/System/deviceInfo"
-    DAHUA_PATH = "/cgi-bin/magicBox.cgi?action=getDeviceType"
+    """
+    Camera credential validator.
+    Each check uses a specific API endpoint with a known response signature
+    so we NEVER report a false positive from a publicly-accessible page.
+    """
     RTSP_PORT = 554
+    TIMEOUT   = 3.5
+
+    # Endpoints with deterministic success markers ─────────────────────
+    # (url_suffix, success_strings_in_body, auth_types_to_try)
+    HIK_ENDPOINTS = [
+        ("/ISAPI/System/deviceInfo",   ["<DeviceInfo", "<serialNumber", "deviceName"]),
+        ("/ISAPI/Security/userCheck",  ["statusValue", "<statusValue"]),
+    ]
+    DAHUA_ENDPOINTS = [
+        ("/cgi-bin/magicBox.cgi?action=getDeviceType",           ["DeviceType="]),
+        ("/cgi-bin/configManager.cgi?action=getConfig&name=General", ["table.General"]),
+        ("/RPC2",                                                 []),  # body-independent: 200 = auth ok
+    ]
+    # Snapshot endpoints: success = 200 + image/jpeg content-type
+    SNAPSHOT_PATHS = [
+        "/cgi-bin/snapshot.cgi",
+        "/snapshot.cgi",
+        "/snap.jpg",
+        "/image/jpeg.cgi",
+        "/cgi-bin/hi3510/snap.cgi",
+    ]
 
     def __init__(self, ip, username, password, port=80):
         self.ip       = ip
         self.username = username
         self.password = password
         self.port     = port
-        self.timeout  = 4.0
 
     def validate(self, hint=None):
         if not HAS_REQUESTS:
             return False, "requests library not installed"
 
-        url_base  = f"http://{self.ip}:{self.port}"
-        url_https = f"https://{self.ip}:{self.port}"
+        base_http  = f"http://{self.ip}:{self.port}"
+        base_https = f"https://{self.ip}:{self.port}"
 
-        # --- 1. Hikvision ISAPI ---
-        for base in (url_base, url_https):
-            ok, msg = self._try_hikvision(base + self.HIK_PATH)
+        # 1. Hikvision ISAPI
+        for suffix, markers in self.HIK_ENDPOINTS:
+            for base in (base_http, base_https):
+                ok, msg = self._check_endpoint(base + suffix, markers, "Hikvision")
+                if ok: return True, msg
+
+        # 2. Dahua / Anjhua CGI + RPC2
+        for suffix, markers in self.DAHUA_ENDPOINTS:
+            for base in (base_http, base_https):
+                ok, msg = self._check_endpoint(base + suffix, markers, "Dahua")
+                if ok: return True, msg
+
+        # 3. Image snapshot — content-type: image/jpeg proves auth
+        for path in self.SNAPSHOT_PATHS:
+            ok, msg = self._check_snapshot(base_http + path)
             if ok: return True, msg
 
-        # --- 2. Dahua/Anjhua CGI ---
-        for base in (url_base, url_https):
-            ok, msg = self._try_dahua_cgi(base + self.DAHUA_PATH)
-            if ok: return True, msg
-
-        # --- 3. RTSP (Dahua/generic) ---
+        # 4. RTSP
         ok, msg = self._try_rtsp()
         if ok: return True, msg
 
-        # --- 4. Generic root login check ---
-        ok, msg = self._try_generic_root(url_base)
-        if ok: return True, msg
+        return False, "No match"
 
-        return False, "All validation methods failed"
+    # ── helpers ──────────────────────────────────────────────────────────
 
-    # ------------------------------------------------------------------
-    def _get(self, url, auth, redirects=False):
-        """Shared GET helper. Returns (response | None)."""
+    def _get(self, url, auth):
+        """GET with no redirect following — redirects are auth failures."""
         try:
             return requests.get(
                 url, auth=auth,
-                timeout=self.timeout, verify=False,
-                allow_redirects=redirects
+                timeout=self.TIMEOUT, verify=False,
+                allow_redirects=False          # ← KEY: no redirect chasing
             )
         except Exception:
             return None
 
-    def _try_hikvision(self, url):
+    def _check_endpoint(self, url, success_markers, brand):
         """
-        Hikvision ISAPI: must return status 200 AND body must contain
-        '<DeviceInfo' (the actual XML payload).  A redirect / plain login
-        page never contains that tag.
-        """
-        for auth in (
-            HTTPDigestAuth(self.username, self.password),
-            (self.username, self.password),
-        ):
-            r = self._get(url, auth)
-            if r is None:
-                continue
-            if r.status_code == 200:
-                body = r.text
-                # Confirm real ISAPI XML — reject fake 200s
-                if '<DeviceInfo' in body or 'deviceName' in body or '<serialNumber' in body:
-                    label = "Digest" if isinstance(auth, HTTPDigestAuth) else "Basic"
-                    return True, f"Hikvision ISAPI ({label} Auth)"
-            # 401 = wrong creds, 3xx = camera moved — both are false
-        return False, "Failed"
-
-    def _try_dahua_cgi(self, url):
-        """
-        Dahua CGI: successful auth returns a plain text body like:
-          DeviceType=IPC-xxx\r\nSerialNo=xxx
-        A failed attempt returns 401 or a redirect to the login page.
+        Try Digest then Basic auth.
+        Success = status 200 AND (no markers required OR at least one marker in body).
+        A redirect (3xx) or 401 is always a failure.
         """
         for auth in (
             HTTPDigestAuth(self.username, self.password),
@@ -183,49 +187,46 @@ class CameraValidator:
             if r is None:
                 continue
             if r.status_code == 200:
-                body = r.text.strip()
-                # Dahua CGI always starts with DeviceType= on success
-                if body.startswith("DeviceType=") or "DeviceType" in body:
-                    label = "Digest" if isinstance(auth, HTTPDigestAuth) else "Basic"
-                    return True, f"Dahua CGI ({label} Auth)"
+                # If we require specific body markers, check them
+                if success_markers:
+                    if any(m in r.text for m in success_markers):
+                        label = "Digest" if isinstance(auth, HTTPDigestAuth) else "Basic"
+                        return True, f"{brand} ({label} Auth)"
+                else:
+                    # No markers required (e.g. RPC2 — 200 = authenticated)
+                    # But reject if body suggests it's a login page
+                    body_low = r.text.lower()
+                    if not any(w in body_low for w in ['<form', 'type="password"', "type='password'", 'login']):
+                        label = "Digest" if isinstance(auth, HTTPDigestAuth) else "Basic"
+                        return True, f"{brand} ({label} Auth)"
         return False, "Failed"
 
-    def _try_generic_root(self, url_base):
+    def _check_snapshot(self, url):
         """
-        Last-resort: GET the root page with credentials.
-        Success requires status 200 AND body must NOT contain common
-        login-page indicators (meaning auth was actually accepted).
+        Snapshot check: a real JPEG response (Content-Type contains image/)
+        proves the camera accepted credentials.  An HTML login page never
+        returns Content-Type: image/jpeg.
         """
-        LOGIN_INDICATORS = [
-            'type="password"', "type='password'",
-            'name="password"', "name='password'",
-            '<form', 'login.html', 'login.asp',
-            'please log in', 'please login',
-            'sign in', 'username', 'incorrect password',
-        ]
         for auth in (
             HTTPDigestAuth(self.username, self.password),
             (self.username, self.password),
         ):
-            r = self._get(url_base + "/", auth)
+            r = self._get(url, auth)
             if r is None:
                 continue
             if r.status_code == 200:
-                body_low = r.text.lower()
-                # If response looks like a login page → false positive, skip
-                if any(ind in body_low for ind in LOGIN_INDICATORS):
-                    continue
-                # Non-login 200 → likely authenticated
-                label = "Digest" if isinstance(auth, HTTPDigestAuth) else "Basic"
-                return True, f"Generic ({label} Auth)"
+                ct = r.headers.get("Content-Type", "").lower()
+                if "image/" in ct:
+                    label = "Digest" if isinstance(auth, HTTPDigestAuth) else "Basic"
+                    return True, f"Snapshot ({label} Auth)"
         return False, "Failed"
 
     def _try_rtsp(self):
-        """RTSP DESCRIBE with Basic auth."""
+        """RTSP DESCRIBE with Basic auth — checks for RTSP/1.0 200 OK exactly."""
         sock = None
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(self.timeout)
+            sock.settimeout(self.TIMEOUT)
             sock.connect((self.ip, self.RTSP_PORT))
 
             rtsp_url = f"rtsp://{self.ip}:{self.RTSP_PORT}/cam/realmonitor?channel=1&subtype=0"
@@ -240,7 +241,7 @@ class CameraValidator:
                 "\r\n"
             )
             sock.send(request.encode())
-            response = sock.recv(4096).decode(errors='ignore')
+            response = sock.recv(4096).decode(errors="ignore")
 
             if "RTSP/1.0 200 OK" in response:
                 return True, "RTSP (Basic Auth)"
@@ -251,6 +252,7 @@ class CameraValidator:
                 try: sock.close()
                 except: pass
         return False, "Failed"
+
 
 
 # Keep old names for compatibility if needed, but point to new logic
