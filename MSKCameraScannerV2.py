@@ -52,6 +52,15 @@ try:
 except ImportError:
     HAS_REQUESTS = False
 
+# Try to import scapy for deep scan traceroute
+try:
+    import logging
+    logging.getLogger("scapy.runtime").setLevel(logging.ERROR)
+    from scapy.all import IP, TCP, sr1
+    HAS_SCAPY = True
+except ImportError:
+    HAS_SCAPY = False
+
 def typing_print(text, speed=0.005):
     """Prints text character by character for a cinematic effect"""
     for char in text:
@@ -607,59 +616,30 @@ def get_ip_geolocation(ip):
     return ""
 
 
-def trace_route():
-    """Enhanced Trace route to a domain/IP with Geolocation and nearest detection"""
-    print(f"\n{Fore.CYAN}{'='*60}{Style.RESET_ALL}")
-    print(f"{Fore.YELLOW}[🔍] ENHANCED TRACE ROUTE MODE [🔍]{Style.RESET_ALL}")
-    print(f"{Fore.CYAN}{'='*60}{Style.RESET_ALL}\n")
-    
-    print(f"{Fore.CYAN}Options:{Style.RESET_ALL}")
-    print(f"  1. Auto-detect Nearest Route (Traces to Cloudflare Anycast 1.1.1.1)")
-    print(f"  2. Custom Target (Domain or IP)")
-    
-    choice = input(f"\n{Fore.GREEN}Select option (1/2) [Default: 1]: {Style.RESET_ALL}").strip()
-    
-    if choice == '2':
-        target = input(f"{Fore.GREEN}Enter Target Domain/IP: {Style.RESET_ALL}").strip()
-        if not target:
-            target = "8.8.8.8"
-    else:
-        target = "1.1.1.1"
-        print(f"{Fore.YELLOW}[i] Using Anycast Target (1.1.1.1) to find nearest edge server.{Style.RESET_ALL}")
-    
-    print(f"\n{Fore.GREEN}[i] Target: {Fore.CYAN}{target}{Style.RESET_ALL}")
-    print(f"{Fore.YELLOW}[*] Tracing route to {Fore.CYAN}{target}{Style.RESET_ALL}")
-    print(f"{Fore.YELLOW}[*] Gathering Geolocation... Please wait.{Style.RESET_ALL}\n")
-    print(f"{Fore.CYAN}{'─'*60}{Style.RESET_ALL}\n")
-    
+def classic_traceroute(target):
+    """OS Native Traceroute with Smart Interpretation"""
     try:
         system = platform.system()
         
         if system == "Windows":
-            # Windows tracert command (fast mode with max 30 hops)
             cmd = ['tracert', '-d', '-h', '30', '-w', '1000', target]
         else:
-            # Linux/macOS/Termux traceroute command
             cmd = None
             try:
                 subprocess.run(['traceroute', '--version'], capture_output=True, timeout=2)
                 cmd = ['traceroute', '-n', '-m', '30', '-w', '1', target]
             except:
                 pass
-            
             if cmd is None:
                 try:
                     subprocess.run(['tracepath', '-V'], capture_output=True, timeout=2)
                     cmd = ['tracepath', '-n', target]
                 except:
                     pass
-            
             if cmd is None:
                 cmd = ['traceroute', '-n', '-m', '30', '-w', '1', target]
         
-        # Run the command and display output in real-time
         process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        
         hop_count = 0
         ip_regex = re.compile(r'\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b')
         
@@ -669,27 +649,26 @@ def trace_route():
                 if not line:
                     continue
                     
-                # Extract IP for geolocation
                 found_ips = ip_regex.findall(line)
                 geo_info = ""
-                # Avoid matching the target IP if it's just repeating it in the header
                 if found_ips and "Tracing route" not in line and "traceroute" not in line and "maximum" not in line:
-                    # Get the first IP on the line (usually the hop router)
                     hop_ip = found_ips[0]
                     geo_info = get_ip_geolocation(hop_ip)
                 
-                # Color code the output
+                # Smart Interpretation
                 if '*' in line or 'timeout' in line.lower() or 'timed out' in line.lower():
-                    print(f"{Fore.RED}{line}{Style.RESET_ALL}")
+                    # Distinguish true timeouts vs rate-limited hops (where at least one probe succeeded)
+                    if 'ms' in line.lower() or '<' in line:
+                        print(f"{Fore.YELLOW}[Rate Limited] {line}{geo_info}{Style.RESET_ALL}")
+                    else:
+                        print(f"{Fore.RED}{line}{Style.RESET_ALL}")
                 elif 'ms' in line.lower() or 'Tracing' in line or 'traceroute' in line:
-                    # Highlight successful hops
                     if any(char.isdigit() for char in line) and ('ms' in line.lower() or '<' in line):
                         hop_count += 1
                         print(f"{Fore.GREEN}[Hop {hop_count:2d}] {line}{geo_info}{Style.RESET_ALL}")
                     else:
                         print(f"{Fore.CYAN}{line}{Style.RESET_ALL}")
                 else:
-                    # Output line might have an IP but no 'ms'
                     if found_ips and not "Tracing" in line:
                          print(f"{Fore.WHITE}{line}{geo_info}{Style.RESET_ALL}")
                     else:
@@ -698,18 +677,106 @@ def trace_route():
         process.wait()
         
         print(f"\n{Fore.CYAN}{'─'*60}{Style.RESET_ALL}")
-        print(f"{Fore.GREEN}[✓] Trace complete!{Style.RESET_ALL}")
-        
+        print(f"{Fore.GREEN}[✓] Classic Trace complete!{Style.RESET_ALL}")
         if hop_count > 0:
             print(f"{Fore.CYAN}[i] Total responding hops: {hop_count}{Style.RESET_ALL}")
-        
+            
     except FileNotFoundError:
         print(f"{Fore.RED}[!] Traceroute command not found on this system{Style.RESET_ALL}")
-        print(f"{Fore.YELLOW}[i] For Termux, install: pkg install inetutils{Style.RESET_ALL}")
-        print(f"{Fore.YELLOW}[i] Or install: pkg install traceroute{Style.RESET_ALL}")
     except Exception as e:
         print(f"{Fore.RED}[!] Error: {e}{Style.RESET_ALL}")
+
+
+def deep_scan_traceroute(target):
+    """Scapy TCP SYN Traceroute for bypassing ICMP filters"""
+    if not HAS_SCAPY:
+        print(f"{Fore.RED}[!] Scapy is not installed or you lack Administrator/Root privileges.{Style.RESET_ALL}")
+        print(f"{Fore.YELLOW}[i] Please install it: pip install scapy{Style.RESET_ALL}")
+        print(f"{Fore.YELLOW}[i] And run this script as Administrator (Windows) or root (Linux) to use Deep Scan.{Style.RESET_ALL}")
+        return
+        
+    print(f"{Fore.YELLOW}[*] Initializing Scapy TCP SYN Traceroute (Port 80)...{Style.RESET_ALL}")
+    print(f"{Fore.YELLOW}[!] Note: This mode includes deliberate delays to avoid router rate-limiting.{Style.RESET_ALL}\n")
     
+    max_hops = 30
+    try:
+        target_ip = socket.gethostbyname(target)
+    except socket.gaierror:
+        print(f"{Fore.RED}[!] Could not resolve {target}{Style.RESET_ALL}")
+        return
+        
+    print(f"{Fore.CYAN}Tracing to {target_ip} on TCP Port 80...{Style.RESET_ALL}")
+    
+    hop_count = 0
+    for ttl in range(1, max_hops + 1):
+        # Craft TCP SYN packet with constant source port (Paris Traceroute concept)
+        pkt = IP(dst=target_ip, ttl=ttl) / TCP(sport=33434, dport=80, flags="S")
+        start = time.time()
+        reply = sr1(pkt, verbose=0, timeout=2)
+        elapsed = (time.time() - start) * 1000
+        
+        if reply is None:
+            print(f"{Fore.RED}[Hop {ttl:2d}] * * * Request timed out.{Style.RESET_ALL}")
+        elif reply.type == 11: # ICMP Time Exceeded (router in path)
+            hop_ip = reply.src
+            geo_info = get_ip_geolocation(hop_ip)
+            hop_count += 1
+            print(f"{Fore.GREEN}[Hop {ttl:2d}] {elapsed:.1f} ms {hop_ip}{geo_info}{Style.RESET_ALL}")
+        elif reply.haslayer(TCP) and (reply.getlayer(TCP).flags & 0x12): # SYN-ACK (Target reached)
+            hop_ip = reply.src
+            geo_info = get_ip_geolocation(hop_ip)
+            hop_count += 1
+            print(f"{Fore.GREEN}[Hop {ttl:2d}] {elapsed:.1f} ms {hop_ip}{geo_info} {Fore.CYAN}[Target Reached]{Style.RESET_ALL}")
+            break
+        else:
+            hop_ip = reply.src
+            geo_info = get_ip_geolocation(hop_ip)
+            print(f"{Fore.WHITE}[Hop {ttl:2d}] {elapsed:.1f} ms {hop_ip}{geo_info} [Unknown Response]{Style.RESET_ALL}")
+            break
+            
+        # Polite rate limiting to avoid triggering IDS/router control plane protections
+        time.sleep(0.5)
+        
+    print(f"\n{Fore.CYAN}{'─'*60}{Style.RESET_ALL}")
+    print(f"{Fore.GREEN}[✓] Deep Scan Trace complete!{Style.RESET_ALL}")
+
+
+def trace_route():
+    """Enhanced Trace route to a domain/IP with Hybrid Modes"""
+    print(f"\n{Fore.CYAN}{'='*60}{Style.RESET_ALL}")
+    print(f"{Fore.YELLOW}[🔍] HYBRID TRACE ROUTE MODE [🔍]{Style.RESET_ALL}")
+    print(f"{Fore.CYAN}{'='*60}{Style.RESET_ALL}\n")
+    
+    print(f"{Fore.CYAN}Scan Modes:{Style.RESET_ALL}")
+    print(f"  1. Classic++ (Fast, Default, Smart Interpretation)")
+    print(f"  2. Deep Scan (TCP SYN, Scapy, Bypasses ICMP Firewalls - Requires Admin)")
+    
+    mode_choice = input(f"\n{Fore.GREEN}Select Mode (1/2) [Default: 1]: {Style.RESET_ALL}").strip()
+    
+    print(f"\n{Fore.CYAN}Targets:{Style.RESET_ALL}")
+    print(f"  1. Classic Target (google.com)")
+    print(f"  2. Nearest Edge Auto-detect (Cloudflare Anycast 1.1.1.1)")
+    print(f"  3. Custom Target (Domain or IP)")
+    
+    target_choice = input(f"\n{Fore.GREEN}Select Target (1/2/3) [Default: 1]: {Style.RESET_ALL}").strip()
+    
+    if target_choice == '2':
+        target = "1.1.1.1"
+    elif target_choice == '3':
+        target = input(f"{Fore.GREEN}Enter Custom Target: {Style.RESET_ALL}").strip()
+        if not target:
+            target = "google.com"
+    else:
+        target = "google.com"
+        
+    print(f"\n{Fore.GREEN}[i] Target: {Fore.CYAN}{target}{Style.RESET_ALL}")
+    print(f"{Fore.CYAN}{'─'*60}{Style.RESET_ALL}\n")
+    
+    if mode_choice == '2':
+        deep_scan_traceroute(target)
+    else:
+        classic_traceroute(target)
+        
     print(f"\n{Fore.CYAN}{'='*60}{Style.RESET_ALL}")
     input(f"\n{Fore.CYAN}Press Enter to continue...{Style.RESET_ALL}")
 
