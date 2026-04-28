@@ -55,14 +55,7 @@ try:
 except ImportError:
     HAS_REQUESTS = False
 
-# Try to import scapy for deep scan traceroute
-try:
-    import logging
-    logging.getLogger("scapy.runtime").setLevel(logging.ERROR)
-    from scapy.all import IP, TCP, sr1
-    HAS_SCAPY = True
-except ImportError:
-    HAS_SCAPY = False
+
 
 def typing_print(text, speed=0.005):
     """Prints text character by character for a cinematic effect"""
@@ -586,22 +579,7 @@ def get_camera_type(response_str, title, filter_mode=1):
 
 # ─── Capability Detection ───────────────────────────────────────────────────
 
-def _has_root() -> bool:
-    if os.name == 'nt':
-        return False
-    try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_ICMP)
-        s.close()
-        return True
-    except Exception:
-        return False
 
-def _scapy_available() -> bool:
-    try:
-        import scapy
-        return True
-    except ImportError:
-        return False
 
 def _tracepath_available() -> bool:
     if os.name == 'nt':
@@ -707,83 +685,7 @@ def _run_os_traceroute(destination: str, max_hops: int = 30) -> TracerouteResult
 
 # ─── Mode 2: Deep Scan (Scapy) ──────────────────────────────────────────────
 
-def _run_scapy_deep_scan(destination: str, max_hops: int = 30, probes_per_hop: int = 3) -> TracerouteResult:
-    from scapy.all import IP, ICMP, TCP, UDP, sr1, conf
-    import scapy.all as scapy
-    dest_ip = socket.gethostbyname(destination)
-    result = TracerouteResult(destination, dest_ip, 'Deep Scan (Scapy)')
-    conf.L3socket = scapy.L3RawSocket
-    paris_ports = {'icmp_id': 0x1234, 'udp_sport': 0x4321, 'tcp_sport': 0x4321, 'udp_dport_base': 33434}
-    protocols = ['ICMP', 'UDP', 'TCP']
 
-    def probe_icmp(ttl, pid, fport):
-        pkt = IP(dst=destination, ttl=ttl) / ICMP(type=8, id=paris_ports['icmp_id'], seq=pid + (ttl * 100))
-        start = time.time()
-        reply = sr1(pkt, timeout=2, verbose=0)
-        rtt = (time.time() - start) * 1000
-        if reply and reply.haslayer(ICMP) and reply[ICMP].type in (11, 0): return (reply[IP].src, rtt)
-        return (None, None)
-
-    def probe_udp(ttl, pid, fport):
-        pkt = IP(dst=destination, ttl=ttl) / UDP(sport=paris_ports['udp_sport'], dport=paris_ports['udp_dport_base'] + ttl)
-        start = time.time()
-        reply = sr1(pkt, timeout=2, verbose=0)
-        rtt = (time.time() - start) * 1000
-        if reply and reply.haslayer(ICMP) and reply[ICMP].type in (11, 3): return (reply[IP].src, rtt)
-        return (None, None)
-
-    def probe_tcp(ttl, pid, fport):
-        pkt = IP(dst=destination, ttl=ttl) / TCP(sport=paris_ports['tcp_sport'], dport=80, flags='S', seq=pid + (ttl * 1000))
-        start = time.time()
-        reply = sr1(pkt, timeout=2, verbose=0)
-        rtt = (time.time() - start) * 1000
-        if reply and ((reply.haslayer(ICMP) and reply[ICMP].type == 11) or (reply.haslayer(TCP) and reply[TCP].flags & 0x12)):
-            return (reply[IP].src, rtt)
-        return (None, None)
-
-    probe_funcs = {'ICMP': probe_icmp, 'UDP': probe_udp, 'TCP': probe_tcp}
-    MIN_PROBE_INTERVAL = 1.0
-
-    for ttl in range(1, max_hops + 1):
-        hop_ips = set()
-        hop_rtts = []
-        total_probes = 0
-        for protocol in protocols:
-            if total_probes >= probes_per_hop: break
-            if total_probes > 0:
-                elapsed = time.time() - result.start_time
-                expected_time = ((ttl - 1) * probes_per_hop + total_probes) * MIN_PROBE_INTERVAL
-                if elapsed < expected_time: time.sleep(expected_time - elapsed)
-            ip, rtt = probe_funcs[protocol](ttl, total_probes, paris_ports.get(f'{protocol.lower()}_sport', 0))
-            total_probes += 1
-            if ip:
-                hop_ips.add(ip)
-                if rtt: hop_rtts.append(rtt)
-
-        if len(hop_ips) >= 2 and total_probes < 6:
-            for _ in range(min(6 - total_probes, 3)):
-                ip, rtt = probe_udp(ttl, total_probes, paris_ports['udp_sport'])
-                total_probes += 1
-                if ip:
-                    hop_ips.add(ip)
-                    if rtt: hop_rtts.append(rtt)
-                time.sleep(MIN_PROBE_INTERVAL)
-
-        if hop_ips:
-            ip_list = sorted(hop_ips)
-            primary_ip = ip_list[0]
-            avg_rtt = sum(hop_rtts) / len(hop_rtts) if hop_rtts else None
-            hop = HopResult(ttl, primary_ip, avg_rtt, probe_type='Multi')
-            if len(hop_ips) > 1: hop.hostname = f"[load-balanced: {', '.join(ip_list)}]"
-            result.hops.append(hop)
-            if primary_ip == dest_ip: break
-        else:
-            result.hops.append(HopResult(ttl, timeout=True, probe_type='Multi'))
-        
-        print(f"    {Fore.CYAN}Hop {ttl}{Fore.RESET}: {result.hops[-1].ip if not result.hops[-1].timeout else '*':<15}", end='\r')
-
-    result.finish()
-    return result
 
 # ─── Mode 3: Rootless Deep Scan ─────────────────────────────────────────────
 
@@ -883,14 +785,12 @@ def trace_route():
     print(f"{Fore.CYAN}{'='*60}{Style.RESET_ALL}\n")
     
     print(f"{Fore.CYAN}Scan Modes:{Style.RESET_ALL}")
-    print(f"  1. Auto-detect (Chooses best available based on Root/Scapy)")
+    print(f"  1. Deep Scan Lite (Rootless multi-protocol UDP+TCP) [Best for Termux]")
     print(f"  2. Classic+ (OS traceroute wrapper with stats)")
-    print(f"  3. Deep Scan Lite (Rootless multi-protocol UDP+TCP)")
-    print(f"  4. Deep Scan (Scapy Paris traceroute - Requires Root)")
     
-    m_input = input(f"\n{Fore.GREEN}Select Mode (1/2/3/4) [Default: 1]: {Style.RESET_ALL}").strip()
-    mode_map = {'1': 'auto', '2': 'classic', '3': 'lite', '4': 'deep'}
-    mode = mode_map.get(m_input, 'auto')
+    m_input = input(f"\n{Fore.GREEN}Select Mode (1/2) [Default: 1]: {Style.RESET_ALL}").strip()
+    mode_map = {'1': 'lite', '2': 'classic'}
+    mode = mode_map.get(m_input, 'lite')
     
     print(f"\n{Fore.CYAN}Targets:{Style.RESET_ALL}")
     print(f"  1. Classic Target (google.com)")
@@ -909,15 +809,6 @@ def trace_route():
     except socket.gaierror:
         print(f"  {Fore.RED}Cannot resolve hostname: {destination}{Style.RESET_ALL}")
         return
-
-    if mode == 'auto':
-        has_root = _has_root()
-        scapy = _scapy_available()
-        tracepath = _tracepath_available()
-        if has_root and scapy: mode = 'deep'
-        elif tracepath: mode = 'lite'
-        else: mode = 'classic'
-        print(f"  Mode: auto → {mode} {'[root]' if has_root else '[rootless]'}")
 
     runs = 2
     max_hops = 30
@@ -970,13 +861,6 @@ def trace_route():
         merged.finish()
         result = merged
 
-    elif mode == 'deep':
-        print(f"  Method: Deep Scan (Scapy Paris + MDA)\n")
-        if not _has_root() or not _scapy_available():
-            print(f"  {Fore.RED}Error: Deep Scan requires Root and Scapy. Falling back to Classic+.{Style.RESET_ALL}\n")
-            result = _run_os_traceroute(destination, max_hops)
-        else:
-            result = _run_scapy_deep_scan(destination, max_hops)
     elif mode == 'lite':
         print(f"  Method: Deep Scan Lite (UDP+TCP rootless merge)\n")
         result = _run_rootless_deep_scan(destination, max_hops)
