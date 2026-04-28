@@ -24,6 +24,9 @@ import subprocess
 import platform
 import random
 import base64
+import json
+import struct
+from typing import List, Dict, Tuple, Optional
 
 # Try to import colorama, but work without it (Termux compatibility)
 try:
@@ -581,202 +584,439 @@ def get_camera_type(response_str, title, filter_mode=1):
     return None
 
 
-def get_ip_geolocation(ip):
-    """Get geolocation data for an IP using free ip-api.com"""
-    if not HAS_REQUESTS:
-        return ""
-    
-    # Skip private IPs
-    if ip.startswith(('10.', '192.168.', '172.')) or ip == '127.0.0.1':
-        return f" {Fore.YELLOW}[Local Network]{Style.RESET_ALL}"
-        
+# ─── Capability Detection ───────────────────────────────────────────────────
+
+def _has_root() -> bool:
+    if os.name == 'nt':
+        return False
     try:
-        # 1.5s timeout so it doesn't block traceroute too much
-        resp = requests.get(f"http://ip-api.com/json/{ip}?fields=status,country,city,isp", timeout=1.5)
-        if resp.status_code == 200:
-            data = resp.json()
-            if data.get("status") == "success":
-                city = data.get("city", "")
-                country = data.get("country", "")
-                isp = data.get("isp", "")
-                
-                location = []
-                if city: location.append(city)
-                if country: location.append(country)
-                loc_str = ", ".join(location)
-                
-                info = []
-                if loc_str: info.append(f"📍 {loc_str}")
-                if isp: info.append(f"🏢 {isp}")
-                
-                if info:
-                    return f" {Fore.MAGENTA}[" + " | ".join(info) + f"]{Style.RESET_ALL}"
+        s = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_ICMP)
+        s.close()
+        return True
+    except Exception:
+        return False
+
+def _scapy_available() -> bool:
+    try:
+        import scapy
+        return True
+    except ImportError:
+        return False
+
+def _tracepath_available() -> bool:
+    if os.name == 'nt':
+        return False
+    for p in os.environ.get('PATH', '').split(os.pathsep):
+        tp = os.path.join(p, 'tracepath')
+        if os.path.isfile(tp) and os.access(tp, os.X_OK):
+            return True
+    return False
+
+def _traceroute_available() -> bool:
+    if os.name == 'nt':
+        return bool(subprocess.run('where tracert', shell=True, capture_output=True).returncode == 0)
+    for p in os.environ.get('PATH', '').split(os.pathsep):
+        for name in ('traceroute', 'tracepath'):
+            tp = os.path.join(p, name)
+            if os.path.isfile(tp) and os.access(tp, os.X_OK):
+                return True
+    return False
+
+# ─── Core Data Structures ────────────────────────────────────────────────────
+
+class HopResult:
+    def __init__(self, ttl: int, ip: Optional[str] = None, rtt_ms: Optional[float] = None, hostname: str = '', probe_type: str = 'UDP', timeout: bool = False):
+        self.ttl = ttl
+        self.ip = ip
+        self.rtt_ms = rtt_ms
+        self.hostname = hostname
+        self.probe_type = probe_type
+        self.timeout = timeout
+        self.asn = ''
+        self.isp = ''
+        self.country = ''
+
+class TracerouteResult:
+    def __init__(self, destination: str, dest_ip: str, mode: str):
+        self.destination = destination
+        self.dest_ip = dest_ip
+        self.mode = mode
+        self.hops: List[HopResult] = []
+        self.start_time = time.time()
+        self.end_time: Optional[float] = None
+
+    @property
+    def duration(self) -> float:
+        if self.end_time: return self.end_time - self.start_time
+        return time.time() - self.start_time
+
+    def finish(self):
+        self.end_time = time.time()
+
+    def nearest_hops(self, n: int = 3) -> List[HopResult]:
+        valid = [h for h in self.hops if not h.timeout and h.ip]
+        return valid[:n]
+
+# ─── Mode 1: Classic+ ───────────────────────────────────────────────────────
+
+def _run_os_traceroute(destination: str, max_hops: int = 30) -> TracerouteResult:
+    dest_ip = socket.gethostbyname(destination)
+    result = TracerouteResult(destination, dest_ip, 'Classic+')
+    system = platform.system().lower()
+
+    if system == 'windows':
+        cmd = ['tracert', '-d', '-h', str(max_hops), '-w', '1000', destination]
+        probe_type = 'ICMP'
+        pattern = re.compile(r'^\s*(\d+)\s+(?:\*|<?\d+)\s*ms\s+(?:\*|<?\d+)\s*ms\s+(?:\*|<?\d+)\s*ms\s+(\S+)')
+        timeout_pattern = re.compile(r'^\s*(\d+)\s+\*\s+\*\s+\*')
+    elif _tracepath_available():
+        cmd = ['tracepath', '-n', '-m', str(max_hops), destination]
+        probe_type = 'UDP'
+        pattern = re.compile(r'^\s*(\d+):\s+(\S+)\s+(?:(\d+\.?\d*)ms)?')
+        timeout_pattern = re.compile(r'^\s*(\d+):\s+no\s+reply')
+    else:
+        cmd = ['traceroute', '-n', '-m', str(max_hops), '-w', '1', '-q', '1', destination]
+        probe_type = 'UDP'
+        pattern = re.compile(r'^\s*(\d+)\s+(\S+)\s+(\d+\.?\d*)\s*ms')
+        timeout_pattern = re.compile(r'^\s*(\d+)\s+\*')
+
+    try:
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+        for line in proc.stdout:
+            line = line.strip()
+            if not line: continue
+            tm = timeout_pattern.search(line)
+            if tm:
+                ttl = int(tm.group(1))
+                result.hops.append(HopResult(ttl, timeout=True, probe_type=probe_type))
+                continue
+            m = pattern.search(line)
+            if m:
+                ttl = int(m.group(1))
+                ip = m.group(2)
+                rtt_str = m.group(3) if len(m.groups()) >= 3 else None
+                rtt = float(rtt_str) if rtt_str else None
+                if ip == '127.0.0.1' or ip == '::1': continue
+                result.hops.append(HopResult(ttl, ip, rtt, probe_type=probe_type))
+                if ip == dest_ip: break
+        proc.wait(timeout=15)
     except Exception:
         pass
-    return ""
+    result.finish()
+    return result
 
+# ─── Mode 2: Deep Scan (Scapy) ──────────────────────────────────────────────
 
-def classic_traceroute(target):
-    """OS Native Traceroute with Smart Interpretation"""
-    try:
-        system = platform.system()
-        
-        if system == "Windows":
-            cmd = ['tracert', '-d', '-h', '30', '-w', '1000', target]
-        else:
-            cmd = None
-            try:
-                subprocess.run(['traceroute', '--version'], capture_output=True, timeout=2)
-                cmd = ['traceroute', '-n', '-m', '30', '-w', '1', target]
-            except:
-                pass
-            if cmd is None:
-                try:
-                    subprocess.run(['tracepath', '-V'], capture_output=True, timeout=2)
-                    cmd = ['tracepath', '-n', target]
-                except:
-                    pass
-            if cmd is None:
-                cmd = ['traceroute', '-n', '-m', '30', '-w', '1', target]
-        
-        process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        hop_count = 0
-        ip_regex = re.compile(r'\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b')
-        
-        for line in iter(process.stdout.readline, ''):
-            if line:
-                line = line.rstrip()
-                if not line:
-                    continue
-                    
-                found_ips = ip_regex.findall(line)
-                geo_info = ""
-                if found_ips and "Tracing route" not in line and "traceroute" not in line and "maximum" not in line:
-                    hop_ip = found_ips[0]
-                    geo_info = get_ip_geolocation(hop_ip)
-                
-                # Smart Interpretation
-                if '*' in line or 'timeout' in line.lower() or 'timed out' in line.lower():
-                    # Distinguish true timeouts vs rate-limited hops (where at least one probe succeeded)
-                    if 'ms' in line.lower() or '<' in line:
-                        print(f"{Fore.YELLOW}[Rate Limited] {line}{geo_info}{Style.RESET_ALL}")
-                    else:
-                        print(f"{Fore.RED}{line}{Style.RESET_ALL}")
-                elif 'ms' in line.lower() or 'Tracing' in line or 'traceroute' in line:
-                    if any(char.isdigit() for char in line) and ('ms' in line.lower() or '<' in line):
-                        hop_count += 1
-                        print(f"{Fore.GREEN}[Hop {hop_count:2d}] {line}{geo_info}{Style.RESET_ALL}")
-                    else:
-                        print(f"{Fore.CYAN}{line}{Style.RESET_ALL}")
-                else:
-                    if found_ips and not "Tracing" in line:
-                         print(f"{Fore.WHITE}{line}{geo_info}{Style.RESET_ALL}")
-                    else:
-                         print(f"{Fore.WHITE}{line}{Style.RESET_ALL}")
-        
-        process.wait()
-        
-        print(f"\n{Fore.CYAN}{'─'*60}{Style.RESET_ALL}")
-        print(f"{Fore.GREEN}[✓] Classic Trace complete!{Style.RESET_ALL}")
-        if hop_count > 0:
-            print(f"{Fore.CYAN}[i] Total responding hops: {hop_count}{Style.RESET_ALL}")
-            
-    except FileNotFoundError:
-        print(f"{Fore.RED}[!] Traceroute command not found on this system{Style.RESET_ALL}")
-    except Exception as e:
-        print(f"{Fore.RED}[!] Error: {e}{Style.RESET_ALL}")
+def _run_scapy_deep_scan(destination: str, max_hops: int = 30, probes_per_hop: int = 3) -> TracerouteResult:
+    from scapy.all import IP, ICMP, TCP, UDP, sr1, conf
+    import scapy.all as scapy
+    dest_ip = socket.gethostbyname(destination)
+    result = TracerouteResult(destination, dest_ip, 'Deep Scan (Scapy)')
+    conf.L3socket = scapy.L3RawSocket
+    paris_ports = {'icmp_id': 0x1234, 'udp_sport': 0x4321, 'tcp_sport': 0x4321, 'udp_dport_base': 33434}
+    protocols = ['ICMP', 'UDP', 'TCP']
 
-
-def deep_scan_traceroute(target):
-    """Scapy TCP SYN Traceroute for bypassing ICMP filters"""
-    if not HAS_SCAPY:
-        print(f"{Fore.RED}[!] Scapy is not installed or you lack Administrator/Root privileges.{Style.RESET_ALL}")
-        print(f"{Fore.YELLOW}[i] Please install it: pip install scapy{Style.RESET_ALL}")
-        print(f"{Fore.YELLOW}[i] And run this script as Administrator (Windows) or root (Linux) to use Deep Scan.{Style.RESET_ALL}")
-        return
-        
-    print(f"{Fore.YELLOW}[*] Initializing Scapy TCP SYN Traceroute (Port 80)...{Style.RESET_ALL}")
-    print(f"{Fore.YELLOW}[!] Note: This mode includes deliberate delays to avoid router rate-limiting.{Style.RESET_ALL}\n")
-    
-    max_hops = 30
-    try:
-        target_ip = socket.gethostbyname(target)
-    except socket.gaierror:
-        print(f"{Fore.RED}[!] Could not resolve {target}{Style.RESET_ALL}")
-        return
-        
-    print(f"{Fore.CYAN}Tracing to {target_ip} on TCP Port 80...{Style.RESET_ALL}")
-    
-    hop_count = 0
-    for ttl in range(1, max_hops + 1):
-        # Craft TCP SYN packet with constant source port (Paris Traceroute concept)
-        pkt = IP(dst=target_ip, ttl=ttl) / TCP(sport=33434, dport=80, flags="S")
+    def probe_icmp(ttl, pid, fport):
+        pkt = IP(dst=destination, ttl=ttl) / ICMP(type=8, id=paris_ports['icmp_id'], seq=pid + (ttl * 100))
         start = time.time()
-        reply = sr1(pkt, verbose=0, timeout=2)
-        elapsed = (time.time() - start) * 1000
-        
-        if reply is None:
-            print(f"{Fore.RED}[Hop {ttl:2d}] * * * Request timed out.{Style.RESET_ALL}")
-        elif reply.type == 11: # ICMP Time Exceeded (router in path)
-            hop_ip = reply.src
-            geo_info = get_ip_geolocation(hop_ip)
-            hop_count += 1
-            print(f"{Fore.GREEN}[Hop {ttl:2d}] {elapsed:.1f} ms {hop_ip}{geo_info}{Style.RESET_ALL}")
-        elif reply.haslayer(TCP) and (reply.getlayer(TCP).flags & 0x12): # SYN-ACK (Target reached)
-            hop_ip = reply.src
-            geo_info = get_ip_geolocation(hop_ip)
-            hop_count += 1
-            print(f"{Fore.GREEN}[Hop {ttl:2d}] {elapsed:.1f} ms {hop_ip}{geo_info} {Fore.CYAN}[Target Reached]{Style.RESET_ALL}")
-            break
-        else:
-            hop_ip = reply.src
-            geo_info = get_ip_geolocation(hop_ip)
-            print(f"{Fore.WHITE}[Hop {ttl:2d}] {elapsed:.1f} ms {hop_ip}{geo_info} [Unknown Response]{Style.RESET_ALL}")
-            break
-            
-        # Polite rate limiting to avoid triggering IDS/router control plane protections
-        time.sleep(0.5)
-        
-    print(f"\n{Fore.CYAN}{'─'*60}{Style.RESET_ALL}")
-    print(f"{Fore.GREEN}[✓] Deep Scan Trace complete!{Style.RESET_ALL}")
+        reply = sr1(pkt, timeout=2, verbose=0)
+        rtt = (time.time() - start) * 1000
+        if reply and reply.haslayer(ICMP) and reply[ICMP].type in (11, 0): return (reply[IP].src, rtt)
+        return (None, None)
 
+    def probe_udp(ttl, pid, fport):
+        pkt = IP(dst=destination, ttl=ttl) / UDP(sport=paris_ports['udp_sport'], dport=paris_ports['udp_dport_base'] + ttl)
+        start = time.time()
+        reply = sr1(pkt, timeout=2, verbose=0)
+        rtt = (time.time() - start) * 1000
+        if reply and reply.haslayer(ICMP) and reply[ICMP].type in (11, 3): return (reply[IP].src, rtt)
+        return (None, None)
+
+    def probe_tcp(ttl, pid, fport):
+        pkt = IP(dst=destination, ttl=ttl) / TCP(sport=paris_ports['tcp_sport'], dport=80, flags='S', seq=pid + (ttl * 1000))
+        start = time.time()
+        reply = sr1(pkt, timeout=2, verbose=0)
+        rtt = (time.time() - start) * 1000
+        if reply and ((reply.haslayer(ICMP) and reply[ICMP].type == 11) or (reply.haslayer(TCP) and reply[TCP].flags & 0x12)):
+            return (reply[IP].src, rtt)
+        return (None, None)
+
+    probe_funcs = {'ICMP': probe_icmp, 'UDP': probe_udp, 'TCP': probe_tcp}
+    MIN_PROBE_INTERVAL = 1.0
+
+    for ttl in range(1, max_hops + 1):
+        hop_ips = set()
+        hop_rtts = []
+        total_probes = 0
+        for protocol in protocols:
+            if total_probes >= probes_per_hop: break
+            if total_probes > 0:
+                elapsed = time.time() - result.start_time
+                expected_time = ((ttl - 1) * probes_per_hop + total_probes) * MIN_PROBE_INTERVAL
+                if elapsed < expected_time: time.sleep(expected_time - elapsed)
+            ip, rtt = probe_funcs[protocol](ttl, total_probes, paris_ports.get(f'{protocol.lower()}_sport', 0))
+            total_probes += 1
+            if ip:
+                hop_ips.add(ip)
+                if rtt: hop_rtts.append(rtt)
+
+        if len(hop_ips) >= 2 and total_probes < 6:
+            for _ in range(min(6 - total_probes, 3)):
+                ip, rtt = probe_udp(ttl, total_probes, paris_ports['udp_sport'])
+                total_probes += 1
+                if ip:
+                    hop_ips.add(ip)
+                    if rtt: hop_rtts.append(rtt)
+                time.sleep(MIN_PROBE_INTERVAL)
+
+        if hop_ips:
+            ip_list = sorted(hop_ips)
+            primary_ip = ip_list[0]
+            avg_rtt = sum(hop_rtts) / len(hop_rtts) if hop_rtts else None
+            hop = HopResult(ttl, primary_ip, avg_rtt, probe_type='Multi')
+            if len(hop_ips) > 1: hop.hostname = f"[load-balanced: {', '.join(ip_list)}]"
+            result.hops.append(hop)
+            if primary_ip == dest_ip: break
+        else:
+            result.hops.append(HopResult(ttl, timeout=True, probe_type='Multi'))
+        
+        print(f"    {Fore.CYAN}Hop {ttl}{Fore.RESET}: {result.hops[-1].ip if not result.hops[-1].timeout else '*':<15}", end='\r')
+
+    result.finish()
+    return result
+
+# ─── Mode 3: Rootless Deep Scan ─────────────────────────────────────────────
+
+def _run_rootless_deep_scan(destination: str, max_hops: int = 30) -> TracerouteResult:
+    dest_ip = socket.gethostbyname(destination)
+    result = TracerouteResult(destination, dest_ip, 'Deep Scan Lite (rootless)')
+    
+    udp_result = _run_os_traceroute(destination, max_hops)
+    udp_hops = {h.ttl: h for h in udp_result.hops}
+    
+    tcp_hops = {}
+    try:
+        for ttl in range(1, max_hops + 1):
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(1.0)
+            sock.setsockopt(socket.IPPROTO_IP, socket.IP_TTL, ttl)
+            start = time.time()
+            try:
+                sock.connect((dest_ip, 80))
+                rtt = (time.time() - start) * 1000
+                if ttl not in tcp_hops: tcp_hops[ttl] = HopResult(ttl, dest_ip, rtt, probe_type='TCP-SYN')
+                sock.close()
+                continue
+            except socket.timeout:
+                pass
+            except OSError as e:
+                rtt = (time.time() - start) * 1000
+                errno = e.args[0]
+                if errno == 113: # EHOSTUNREACH
+                    tcp_hops[ttl] = HopResult(ttl, '[router]', rtt, probe_type='TCP-SYN')
+                elif errno == 111: # ECONNREFUSED
+                    tcp_hops[ttl] = HopResult(ttl, dest_ip, rtt, probe_type='TCP-SYN')
+                    continue
+            finally:
+                sock.close()
+            time.sleep(0.5)
+    except Exception:
+        pass
+
+    max_ttl = max(max(udp_hops.keys()) if udp_hops else 0, max(tcp_hops.keys()) if tcp_hops else 0)
+    for ttl in range(1, max_ttl + 1):
+        udp = udp_hops.get(ttl)
+        tcp = tcp_hops.get(ttl)
+        if udp and not udp.timeout:
+            hop = HopResult(ttl, udp.ip, udp.rtt_ms, probe_type='UDP+TCP')
+            if tcp and not tcp.timeout:
+                hop.probe_type = 'UDP+TCP'
+                if udp.rtt_ms and tcp.rtt_ms: hop.rtt_ms = (udp.rtt_ms + tcp.rtt_ms) / 2
+            result.hops.append(hop)
+        elif tcp and not tcp.timeout:
+            hop = HopResult(ttl, tcp.ip, tcp.rtt_ms, probe_type='TCP')
+            result.hops.append(hop)
+        else:
+            result.hops.append(HopResult(ttl, timeout=True, probe_type='UDP+TCP'))
+            
+        if (udp and udp.ip == dest_ip) or (tcp and tcp.ip == dest_ip): break
+
+    result.finish()
+    return result
+
+# ─── Enrichment ─────────────────────────────────────────────────────────────
+
+def _resolve_hostname(ip: str) -> str:
+    try:
+        host, _, _ = socket.gethostbyaddr(ip)
+        return host
+    except Exception:
+        return ''
+
+def _get_whois_asn(ip: str) -> Tuple[str, str, str]:
+    try:
+        import urllib.request
+        req = urllib.request.Request(f'http://ip-api.com/json/{ip}?fields=status,country,city,isp', headers={'User-Agent': 'MSK/2.0'})
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            data = json.loads(resp.read().decode())
+            if data.get('status') == 'success':
+                isp = data.get('isp', '')
+                asn = isp.split()[0] if isp.startswith('AS') else ''
+                country = f"{data.get('city', '')}, {data.get('country', '')}".strip(', ')
+                return asn, isp, country
+    except Exception:
+        pass
+    return '', '', ''
+
+def _enrich_nearest_hops(result: TracerouteResult, max_hops: int = 3):
+    print(f"\n  {Fore.YELLOW}[Analyzing nearest hops geolocation/ISP...]{Style.RESET_ALL}")
+    for hop in result.nearest_hops(max_hops):
+        if hop.ip:
+            hop.hostname = _resolve_hostname(hop.ip)
+            hop.asn, hop.isp, hop.country = _get_whois_asn(hop.ip)
+
+# ─── Main Interactive traceroute ─────────────────────────────────────────────
 
 def trace_route():
-    """Enhanced Trace route to a domain/IP with Hybrid Modes"""
     print(f"\n{Fore.CYAN}{'='*60}{Style.RESET_ALL}")
-    print(f"{Fore.YELLOW}[🔍] HYBRID TRACE ROUTE MODE [🔍]{Style.RESET_ALL}")
+    print(f"{Fore.YELLOW}[🔍] HYBRID TRACE ROUTE ENGINE [🔍]{Style.RESET_ALL}")
     print(f"{Fore.CYAN}{'='*60}{Style.RESET_ALL}\n")
     
     print(f"{Fore.CYAN}Scan Modes:{Style.RESET_ALL}")
-    print(f"  1. Classic++ (Fast, Default, Smart Interpretation)")
-    print(f"  2. Deep Scan (TCP SYN, Scapy, Bypasses ICMP Firewalls - Requires Admin)")
+    print(f"  1. Auto-detect (Chooses best available based on Root/Scapy)")
+    print(f"  2. Classic+ (OS traceroute wrapper with stats)")
+    print(f"  3. Deep Scan Lite (Rootless multi-protocol UDP+TCP)")
+    print(f"  4. Deep Scan (Scapy Paris traceroute - Requires Root)")
     
-    mode_choice = input(f"\n{Fore.GREEN}Select Mode (1/2) [Default: 1]: {Style.RESET_ALL}").strip()
+    m_input = input(f"\n{Fore.GREEN}Select Mode (1/2/3/4) [Default: 1]: {Style.RESET_ALL}").strip()
+    mode_map = {'1': 'auto', '2': 'classic', '3': 'lite', '4': 'deep'}
+    mode = mode_map.get(m_input, 'auto')
     
     print(f"\n{Fore.CYAN}Targets:{Style.RESET_ALL}")
     print(f"  1. Classic Target (google.com)")
     print(f"  2. Nearest Edge Auto-detect (Cloudflare Anycast 1.1.1.1)")
     print(f"  3. Custom Target (Domain or IP)")
     
-    target_choice = input(f"\n{Fore.GREEN}Select Target (1/2/3) [Default: 1]: {Style.RESET_ALL}").strip()
-    
-    if target_choice == '2':
-        target = "1.1.1.1"
-    elif target_choice == '3':
-        target = input(f"{Fore.GREEN}Enter Custom Target: {Style.RESET_ALL}").strip()
-        if not target:
-            target = "google.com"
+    t_input = input(f"\n{Fore.GREEN}Select Target (1/2/3) [Default: 1]: {Style.RESET_ALL}").strip()
+    if t_input == '2': destination = "1.1.1.1"
+    elif t_input == '3': destination = input(f"{Fore.GREEN}Enter Custom Target: {Style.RESET_ALL}").strip() or "google.com"
+    else: destination = "google.com"
+
+    print(f"\n  {Fore.CYAN}{Style.BRIGHT}═══ MSK TraceRoute v2.0: {destination} ═══{Style.RESET_ALL}\n")
+    try:
+        dest_ip = socket.gethostbyname(destination)
+        print(f"  Target: {destination} ({dest_ip})")
+    except socket.gaierror:
+        print(f"  {Fore.RED}Cannot resolve hostname: {destination}{Style.RESET_ALL}")
+        return
+
+    if mode == 'auto':
+        has_root = _has_root()
+        scapy = _scapy_available()
+        tracepath = _tracepath_available()
+        if has_root and scapy: mode = 'deep'
+        elif tracepath: mode = 'lite'
+        else: mode = 'classic'
+        print(f"  Mode: auto → {mode} {'[root]' if has_root else '[rootless]'}")
+
+    runs = 2
+    max_hops = 30
+
+    if mode == 'classic':
+        print(f"  Method: Classic+ (OS traceroute, {runs}x averaging)\n")
+        all_results = []
+        for i in range(runs):
+            if runs > 1:
+                print(f"  Run {i+1}/{runs}...")
+            res = _run_os_traceroute(destination, max_hops)
+            all_results.append(res)
+            if i < runs - 1:
+                time.sleep(0.5)
+
+        # Merge: average RTTs, collect all unique IPs per hop
+        merged = TracerouteResult(destination, dest_ip, f'Classic+ ({runs}x avg)')
+        max_ttl = 0
+        for r in all_results:
+            for h in r.hops:
+                if h.ttl > max_ttl:
+                    max_ttl = h.ttl
+
+        for ttl in range(1, max_ttl + 1):
+            ips = set()
+            rtts = []
+            timeout_count = 0
+            for r in all_results:
+                matching = [h for h in r.hops if h.ttl == ttl]
+                if matching:
+                    h = matching[0]
+                    if h.timeout:
+                        timeout_count += 1
+                    else:
+                        ips.add(h.ip)
+                        if h.rtt_ms is not None:
+                            rtts.append(h.rtt_ms)
+
+            if ips and timeout_count < runs:
+                primary = sorted(ips)[0]
+                avg_rtt = sum(rtts) / len(rtts) if rtts else None
+                hop = HopResult(ttl, primary, avg_rtt, probe_type='avg')
+                if len(ips) > 1:
+                    hop.hostname = f"[multi-path: {', '.join(sorted(ips))}]"
+                merged.hops.append(hop)
+                if primary == dest_ip:
+                    break
+            else:
+                merged.hops.append(HopResult(ttl, timeout=True, probe_type='avg'))
+        merged.finish()
+        result = merged
+
+    elif mode == 'deep':
+        print(f"  Method: Deep Scan (Scapy Paris + MDA)\n")
+        if not _has_root() or not _scapy_available():
+            print(f"  {Fore.RED}Error: Deep Scan requires Root and Scapy. Falling back to Classic+.{Style.RESET_ALL}\n")
+            result = _run_os_traceroute(destination, max_hops)
+        else:
+            result = _run_scapy_deep_scan(destination, max_hops)
+    elif mode == 'lite':
+        print(f"  Method: Deep Scan Lite (UDP+TCP rootless merge)\n")
+        result = _run_rootless_deep_scan(destination, max_hops)
     else:
-        target = "google.com"
+        result = _run_os_traceroute(destination, max_hops)
+
+    if result.hops:
+        _enrich_nearest_hops(result)
         
-    print(f"\n{Fore.GREEN}[i] Target: {Fore.CYAN}{target}{Style.RESET_ALL}")
-    print(f"{Fore.CYAN}{'─'*60}{Style.RESET_ALL}\n")
-    
-    if mode_choice == '2':
-        deep_scan_traceroute(target)
-    else:
-        classic_traceroute(target)
-        
+    print(f"\n  {Fore.GREEN}{'─' * 60}{Style.RESET_ALL}")
+    print(f"  {Fore.GREEN}Route to {result.destination} ({result.dest_ip}){Style.RESET_ALL}")
+    print(f"  {Fore.GREEN}Mode: {result.mode} | Duration: {result.duration:.1f}s{Style.RESET_ALL}")
+    print(f"  {Fore.GREEN}Hops: {len(result.hops)}{Style.RESET_ALL}")
+    print(f"  {Fore.GREEN}{'─' * 60}{Style.RESET_ALL}")
+
+    print(f"\n  {'Hop':>4}  {'IP':<16} {'RTT':>8} {'Proto':<10} {'Info'}")
+    print(f"  {'────':>4}  {'────────────────':<16} {'───────':>8} {'───────':<10} {'────'}")
+
+    for hop in result.hops:
+        if hop.timeout:
+            line = f"  {hop.ttl:>4}  {'*':<16} {'N/A':>8} {'——':<10}"
+        else:
+            ip_str = hop.ip or '*'
+            rtt_str = f"{hop.rtt_ms:.1f}ms" if hop.rtt_ms is not None else 'N/A'
+            info = ''
+            if hop.hostname and '[load' not in hop.hostname and '[multi' not in hop.hostname:
+                info = hop.hostname[:40]
+            elif hop.hostname:
+                info = hop.hostname
+            elif hop.isp:
+                info = f"[{hop.country}] {hop.isp[:30]}"
+            
+            # Color code
+            color = Fore.GREEN
+            if hop.probe_type == 'TCP-SYN': color = Fore.CYAN
+            elif hop.probe_type == 'UDP+TCP': color = Fore.YELLOW
+            line = f"  {color}{hop.ttl:>4}  {ip_str:<16} {rtt_str:>8} {hop.probe_type:<10} {info}{Style.RESET_ALL}"
+
+        print(line)
+
     print(f"\n{Fore.CYAN}{'='*60}{Style.RESET_ALL}")
     input(f"\n{Fore.CYAN}Press Enter to continue...{Style.RESET_ALL}")
 
