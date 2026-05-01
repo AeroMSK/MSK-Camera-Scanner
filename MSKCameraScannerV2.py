@@ -1176,6 +1176,7 @@ def brute_force_cameras(camera_list, output_widget=None):
     log(f"\n[*] Starting multi-threaded default credential test on {len(camera_list)} cameras...", Fore.YELLOW)
     
     success_count = 0
+    successful_matches = [] # Track successful logins for final summary
     results_lock = threading.Lock()
 
     def test_single_camera(cam):
@@ -1196,6 +1197,10 @@ def brute_force_cameras(camera_list, output_widget=None):
                     log(f"    [+] SUCCESS: {ip}:{port} | {user}:{pwd} ({msg})", Fore.GREEN)
                     with results_lock:
                         success_count += 1
+                        successful_matches.append({
+                            'ip': ip, 'port': port, 'user': user, 
+                            'pwd': pwd, 'msg': msg
+                        })
                     found_login = True
                     break
             except Exception as e:
@@ -1212,6 +1217,16 @@ def brute_force_cameras(camera_list, output_widget=None):
             pass # Wait for all to finish
             
     log(f"\n[✓] Credential test complete. Found {success_count} matches.", Fore.GREEN)
+    
+    # Print matched devices summary at the end
+    if successful_matches:
+        log(f"\n{Fore.CYAN}{'═'*60}{Style.RESET_ALL}")
+        log(f"{Fore.GREEN}[⭐] MATCHED DEVICES SUMMARY [⭐]{Style.RESET_ALL}")
+        log(f"{Fore.CYAN}{'═'*60}{Style.RESET_ALL}")
+        for i, match in enumerate(successful_matches, 1):
+            log(f"{i}. {Fore.YELLOW}{match['ip']}:{match['port']}{Style.RESET_ALL} -> {Fore.WHITE}{match['user']}:{match['pwd']}{Style.RESET_ALL} ({match['msg']})")
+        log(f"{Fore.CYAN}{'═'*60}{Style.RESET_ALL}")
+
     if not output_widget:
         input(f"\n{Fore.CYAN}[!] Press Enter to continue...{Style.RESET_ALL}")
 
